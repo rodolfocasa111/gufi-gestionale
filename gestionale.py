@@ -125,21 +125,16 @@ if not df_turni.empty:
 
 # --- SALVATAGGIO FOTO CON STRUTTURA GERARCHICA RICHIESTA ---
 def salva_foto_su_storage(file_foto, giorno_data, id_postazione, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
-    # Struttura: Nome_Operatore / Data / Posizione / Dettagli_File
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
-    
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
     cartella_data = giorno_str
-    
     cartella_posizione = pulisci_nome(f"{id_postazione}_{nome_postazione}")
     
     data_ora_scatto = ora_italiana()
     orario_str = data_ora_scatto.strftime('%H-%M-%S')
     gps_info = "41.229565_14.508582"
     
-    # Nome file descrittivo con dettagli incorporati
     nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.jpg"
-    
     path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
     
     file_bytes = file_foto.getvalue()
@@ -848,9 +843,11 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD
+    # 7. FOTO CLOUD (CON DETTAGLI AGGIUNTIVI E METADATI DI SCATTO VISIBILI)
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage")
+        st.caption("Struttura cartelle sul cloud: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
+        
         foto_turni = df_turni[
             (df_turni['foto_postazione'].notna()) & 
             (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
@@ -860,9 +857,23 @@ if st.session_state["ruolo"] == "admin":
             for idx_f, (_, r_f) in enumerate(foto_turni.iterrows()):
                 with cols[idx_f % 3]:
                     try:
+                        url_foto = str(r_f['foto_postazione'])
+                        info_dettaglio = ""
+                        if "Ore_" in url_foto:
+                            parti_url = url_foto.split("/")
+                            nome_f_cloud = parti_url[-1] if parti_url else ""
+                            info_dettaglio = f"\n📄 {nome_f_cloud.replace('.jpg', '').replace('_', ' ')}"
+
+                        cap_testo = (
+                            f"👤 **{r_f['cognome_guardia']}** | 📍 **{r_f['id_postazione']}**\n"
+                            f"📅 **Data:** {r_f['data']}\n"
+                            f"🟢 **Check-in:** {r_f.get('check_in_effettivo', 'N/D')}"
+                            f"{info_dettaglio}"
+                        )
+
                         st.image(
                             r_f['foto_postazione'], 
-                            caption=f"{r_f['cognome_guardia']} - {r_f['id_postazione']} ({r_f['data']})", 
+                            caption=cap_testo, 
                             use_container_width=True
                         )
                     except Exception:
