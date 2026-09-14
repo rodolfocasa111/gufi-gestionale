@@ -58,7 +58,7 @@ def registra_log(autore, azione, dettagli):
     except Exception as e:
         st.error(f"Errore registrazione log: {e}")
 
-# --- FUNZIONI CARICAMENTO DATI DA SUPABASE ---
+# --- CARICAMENTO DATI DA SUPABASE ---
 def carica_dati():
     res_dip = supabase.table("dipendenti").select("*").execute()
     df_dip = pd.DataFrame(res_dip.data)
@@ -83,6 +83,38 @@ def carica_dati():
     return df_turni, df_dip, df_post
 
 df_turni, df_dip, df_post = carica_dati()
+
+# --- RISOLUZIONE AUTOMATICA COGNOME GUARDIA (ELIMINA CODICI COME G016) ---
+mappa_id_cognome = {}
+if not df_dip.empty:
+    for _, r_d in df_dip.iterrows():
+        id_g = str(r_d['id_guardia']).strip().lower()
+        cogn = str(r_d['cognome']).strip()
+        if id_g:
+            mappa_id_cognome[id_g] = cogn
+
+def risolvi_cognome_effettivo(r):
+    val_cogn = str(r.get('cognome_guardia', '')).strip()
+    val_id = str(r.get('id_guardia', '')).strip().lower()
+    
+    # Se il campo cognome contiene in realtà il codice (es: G016)
+    if val_cogn.lower() in mappa_id_cognome:
+        return mappa_id_cognome[val_cogn.lower()]
+    # Controllo via ID Guardia
+    if val_id in mappa_id_cognome:
+        return mappa_id_cognome[val_id]
+    # Se contiene trattino tipo 'G001 - Mirra'
+    if "-" in val_cogn:
+        parti = val_cogn.split("-")
+        possibile_id = parti[0].strip().lower()
+        if possibile_id in mappa_id_cognome:
+            return mappa_id_cognome[possibile_id]
+        return parti[-1].strip()
+        
+    return val_cogn if val_cogn else "N/D"
+
+if not df_turni.empty:
+    df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
 def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else datetime.now().strftime("%Y-%m-%d")
@@ -134,18 +166,19 @@ def calcola_ore(ora_inizio, ora_fine):
             return 0.0
         str_i = str(ora_inizio).strip().split()[-1]
         str_f = str(ora_fine).strip().split()[-1]
+        t_ini, t_fin = None, None
         for fmt in ["%H:%M:%S", "%H:%M"]:
             try:
                 t_ini = datetime.strptime(str_i, fmt)
                 break
             except Exception:
-                t_ini = None
+                pass
         for fmt in ["%H:%M:%S", "%H:%M"]:
             try:
                 t_fin = datetime.strptime(str_f, fmt)
                 break
             except Exception:
-                t_fin = None
+                pass
         if t_ini and t_fin:
             diff = (t_fin - t_ini).total_seconds() / 3600.0
             if diff < 0:
@@ -175,7 +208,7 @@ if not st.session_state["autenticato"]:
         tab_user, tab_admin = st.tabs(["👤 Area Personale Dipendente", "🔐 Accesso Responsabili (Tiziana / Rino)"])
 
         with tab_user:
-            st.info("Accedi con il tuo Cognome e Password personale.")
+            st.info("Accedi con il tuo Cognome e la tua Password personale.")
             with st.form("form_login_op"):
                 cognome_input = st.text_input("Cognome:")
                 pwd_input = st.text_input("Password:", type="password")
@@ -230,7 +263,7 @@ if st.session_state["ruolo"] == "operatore":
     c_h1, c_h2 = st.columns([4, 1.2])
     with c_h1:
         st.markdown(f"### 👋 Operatore: **{op['nome']}** `[{op['id']}]`")
-        st.caption("I tuoi turni da 2 giorni fa a tutti i futuri. Dati salvati su Cloud Supabase.")
+        st.caption("I tuoi turni attivi da 2 giorni fa a tutti i futuri. Sincronizzato con Supabase.")
     with c_h2:
         if st.button("🚪 Esci", use_container_width=True):
             registra_log(op["nome"], "LOGOUT", "Disconnessione dipendente")
@@ -420,7 +453,7 @@ if st.session_state["ruolo"] == "admin":
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-    # 2. GESTIONE TURNI PER POSTAZIONE
+    # 2. GESTIONE TURNI PER POSTAZIONE (MOSTRA IL COGNOME DELLA GUARDIA)
     elif menu_admin == "📅 Gestione Turni per Postazione":
         st.subheader("📅 Aggiunta & Gestione Turni per Ciascuna Postazione")
         if not df_post.empty:
@@ -558,7 +591,7 @@ if st.session_state["ruolo"] == "admin":
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
                             "email": nuova_email.strip(),
-                            "password": nuova_pwd.strip()
+                            "password": nuovo_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
