@@ -550,7 +550,6 @@ if st.session_state["ruolo"] == "admin":
             "📍 Gestione Postazioni (Modifica/Aggiungi)",
             "💶 Piano Economico (Fatturato & Ore)",
             "📁 Foto Postazioni Cloud",
-            "🗑️ Gestione & Cancellazione (Turni & Foto)",
             "🛡️ Registro Modifiche (Audit Log)"
         ],
         label_visibility="collapsed"
@@ -601,7 +600,7 @@ if st.session_state["ruolo"] == "admin":
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-    # 2. GESTIONE TURNI PER POSTAZIONE
+    # 2. GESTIONE TURNI PER POSTAZIONE (CON CANCELLAZIONE SELETTIVA INTEGRATA)
     elif menu_admin == "📅 Gestione Turni per Postazione":
         st.subheader("📅 Aggiunta & Gestione Turni per Ciascuna Postazione")
         if not df_post.empty:
@@ -611,13 +610,37 @@ if st.session_state["ruolo"] == "admin":
                 
                 with st.expander(f"📍 Postazione: {id_pst} — {nome_pst}"):
                     turni_questa_post = df_turni[df_turni['id_postazione'] == id_pst].copy()
+                    
                     if not turni_questa_post.empty:
-                        st.write("**Turni programmati:**")
-                        vis_sub = turni_questa_post[['id_turno', 'data', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo', 'registrato_da']].tail(5)
-                        st.dataframe(vis_sub, use_container_width=True)
+                        st.write("**Turni programmati (Seleziona per eliminare):**")
+                        
+                        # Tabella interattiva con caselle di spunta per la cancellazione
+                        df_del_view = turni_questa_post[['id_turno', 'data', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo']].copy()
+                        df_del_view.insert(0, "Seleziona", False)
+                        
+                        edited_del = st.data_editor(
+                            df_del_view,
+                            use_container_width=True,
+                            hide_index=True,
+                            key=f"editor_del_{id_pst}"
+                        )
+                        
+                        if st.button(f"🗑️ Elimina Turni Selezionati da {nome_pst}", key=f"btn_del_{id_pst}", type="secondary"):
+                            selezionati_del = edited_del[edited_del['Seleziona'] == True]
+                            if not selezionati_del.empty:
+                                ids_del = selezionati_del['id_turno'].tolist()
+                                for tid in ids_del:
+                                    supabase.table("turni").delete().eq("id_turno", tid).execute()
+                                
+                                registra_log(adm["nome"], "CANCELLAZIONE_TURNI", f"Eliminati turni da {nome_pst}: {ids_del}")
+                                st.success(f"✅ Eliminati con successo {len(ids_del)} turni!")
+                                st.rerun()
+                            else:
+                                st.warning("Spunta almeno un turno da eliminare nella tabella.")
                     else:
                         st.info("Nessun turno programmato su questa postazione.")
 
+                    st.markdown("---")
                     st.markdown("##### ➕ Aggiungi Turno:")
                     with st.form(f"form_add_turno_{id_pst}"):
                         c_t1, c_t2, c_t3 = st.columns(3)
@@ -915,38 +938,7 @@ if st.session_state["ruolo"] == "admin":
         else:
             st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud valido.")
 
-    # 8. SEZIONE NUOVA: GESTIONE & CANCELLAZIONE (TURNI SELEZIONATI)
-    elif menu_admin == "🗑️ Gestione & Cancellazione (Turni & Foto)":
-        st.subheader("🗑️ Eliminazione Selettiva Turni")
-        st.warning("⚠️ Attenzione: la cancellazione dei turni dal database è irreversibile.")
-
-        if not df_turni.empty:
-            df_edit_del = df_turni.copy()
-            df_edit_del.insert(0, "Seleziona", False)
-            
-            # Mostra tabella interattiva con caselle di spunta
-            edited_df = st.data_editor(
-                df_edit_del[['Seleziona', 'id_turno', 'data', 'cognome_guardia', 'id_postazione', 'check_in_effettivo', 'check_out_effettivo']],
-                use_container_width=True,
-                hide_index=True
-            )
-
-            if st.button("🗑️ Elimina Turni Selezionati", type="primary"):
-                selezionati = edited_df[edited_df['Seleziona'] == True]
-                if not selezionati.empty:
-                    ids_da_eliminare = selezionati['id_turno'].tolist()
-                    for tid in ids_da_eliminare:
-                        supabase.table("turni").delete().eq("id_turno", tid).execute()
-                    
-                    registra_log(adm["nome"], "CANCELLAZIONE_TURNI", f"Eliminati turni: {ids_da_eliminare}")
-                    st.success(f"✅ Eliminati con successo {len(ids_da_eliminare)} turni dal database!")
-                    st.rerun()
-                else:
-                    st.info("Seleziona almeno un turno spuntando la casella corrispondente.")
-        else:
-            st.info("Nessun turno presente nel database.")
-
-    # 9. AUDIT LOG
+    # 8. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
         st.subheader("🛡️ Storico Azioni Capi Reparto (Supabase Audit)")
         res_log = supabase.table("audit_log").select("*").order("id", desc=True).limit(500).execute()
