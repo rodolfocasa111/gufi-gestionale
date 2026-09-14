@@ -58,7 +58,7 @@ def registra_log(autore, azione, dettagli):
     except Exception as e:
         st.error(f"Errore registrazione log: {e}")
 
-# --- CARICAMENTO DATI DA SUPABASE (LIMITE AMPLIATO) ---
+# --- CARICAMENTO DATI DA SUPABASE ---
 def carica_dati():
     res_dip = supabase.table("dipendenti").select("*").limit(2000).execute()
     df_dip = pd.DataFrame(res_dip.data)
@@ -84,7 +84,7 @@ def carica_dati():
 
 df_turni, df_dip, df_post = carica_dati()
 
-# --- MAPPATURA E RISOLUZIONE COGNOMI ---
+# --- MAPPATURA AUTOMATICA COGNOMI ---
 mappa_id_cognome = {}
 if not df_dip.empty:
     for _, r_d in df_dip.iterrows():
@@ -113,6 +113,7 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
+# --- SALVATAGGIO FOTO CON GESTIONE ERRORI ED ESISTENZA ---
 def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else datetime.now().strftime("%Y-%m-%d")
     timestamp = datetime.now().strftime('%H%M%S')
@@ -120,15 +121,27 @@ def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nom
     path_remoto = f"{giorno_str}/{pulisci_nome(id_postazione)}/{pulisci_nome(id_guardia)}_{pulisci_nome(nome_guardia)}/{nome_file}"
     
     file_bytes = file_foto.getvalue()
-    supabase.storage.from_(BUCKET_FOTO).upload(
-        path=path_remoto,
-        file=file_bytes,
-        file_options={"content-type": "image/jpeg", "upsert": "true"}
-    )
+    try:
+        supabase.storage.from_(BUCKET_FOTO).upload(
+            path=path_remoto,
+            file=file_bytes,
+            file_options={"content-type": "image/jpeg", "upsert": "true"}
+        )
+    except Exception:
+        try:
+            supabase.storage.from_(BUCKET_FOTO).update(
+                path=path_remoto,
+                file=file_bytes,
+                file_options={"content-type": "image/jpeg"}
+            )
+        except Exception as e_up:
+            st.error(f"Errore caricamento su Supabase Storage: {e_up}")
+            raise e_up
+            
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
-# --- PARSER ONNIVORO DELLE DATE (INCLUSI TESTI ESTESI: "mercoledì 12 agosto 2026") ---
+# --- PARSER DATA ROBUSTO ---
 def analizza_data_completa(val):
     if pd.isna(val) or not str(val).strip():
         return None
@@ -149,7 +162,6 @@ def analizza_data_completa(val):
     s = s.replace("-", "/").replace(".", "/")
     parti = s.split()
     
-    # Prova a prendere solo la componente data o a comporla
     if len(parti) >= 3 and parti[0].isdigit() and parti[1].isdigit() and parti[2].isdigit():
         s_data = f"{int(parti[0]):02d}/{int(parti[1]):02d}/{parti[2]}"
     else:
@@ -291,6 +303,7 @@ if st.session_state["ruolo"] == "operatore":
     ].copy()
 
     oggi = date.today()
+    limite_aperti_recenti = oggi - timedelta(days=1)
 
     def turno_completato(r):
         cin = str(r.get('check_in_effettivo', '')).strip()
@@ -298,18 +311,22 @@ if st.session_state["ruolo"] == "operatore":
         return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
                (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
 
-    # 1. TURNI ATTIVI / DA SVOLGERE
+    # Un turno è attivo solo se è di oggi/futuro, oppure di ieri se non ancora chiuso
+    condizione_attivo = (
+        (turni_miei['data_dt'].notna()) & 
+        (
+            (turni_miei['data_dt'] >= oggi) |
+            ((turni_miei['data_dt'] >= limite_aperti_recenti) & (~turni_miei.apply(turno_completato, axis=1)))
+        )
+    )
+
+    # 1. TURNI ATTIVI
     with tab_attivi:
-        turni_attivi = turni_miei[
-            (turni_miei['data_dt'].isna()) |
-            (turni_miei['data_dt'] >= oggi) | 
-            (~turni_miei.apply(turno_completato, axis=1))
-        ].copy()
-        
+        turni_attivi = turni_miei[condizione_attivo].copy()
         turni_attivi = turni_attivi.sort_values(by='data_dt', ascending=True)
 
         if turni_attivi.empty:
-            st.success("🎉 Nessun turno da completare o svolgere al momento.")
+            st.success("🎉 Nessun turno programmato da svolgere nelle date odierne o future.")
         else:
             for _, t in turni_attivi.iterrows():
                 id_t = str(t['id_turno']).strip()
@@ -387,10 +404,10 @@ if st.session_state["ruolo"] == "operatore":
                         st.info("✅ Turno completato e chiuso regolarmente.")
                     st.markdown("---")
 
-    # 2. STORICO COMPLETO TURNI PASSATI
+    # 2. STORICO PASSATI
     with tab_storico:
         st.subheader("📜 Storico Completo dei Tuoi Turni")
-        turni_passati = turni_miei[turni_miei.apply(turno_completato, axis=1) | ((turni_miei['data_dt'].notna()) & (turni_miei['data_dt'] < oggi))].copy()
+        turni_passati = turni_miei[~condizione_attivo].copy()
         turni_passati = turni_passati.sort_values(by='data_dt', ascending=False)
 
         if not turni_passati.empty:
@@ -421,7 +438,7 @@ if st.session_state["ruolo"] == "operatore":
         else:
             st.info("Nessun turno archiviato nello storico.")
 
-    # 3. FOTO CARICATE DALL'OPERATORE (CON PROTEZIONE LINK)
+    # 3. FOTO CARICATE
     with tab_foto_op:
         st.subheader(f"📸 Foto caricate da te ({op['nome']})")
         mie_foto = df_turni[
@@ -518,7 +535,7 @@ if st.session_state["ruolo"] == "admin":
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-    # 2. GESTIONE TURNI PER POSTAZIONE (COGNOME DELLA GUARDIA IN PRIMO PIANO)
+    # 2. GESTIONE TURNI PER POSTAZIONE
     elif menu_admin == "📅 Gestione Turni per Postazione":
         st.subheader("📅 Aggiunta & Gestione Turni per Ciascuna Postazione")
         if not df_post.empty:
@@ -791,7 +808,7 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD (CON GESTIONE ERRORI E FILTRO URL)
+    # 7. FOTO CLOUD
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage")
         foto_turni = df_turni[
