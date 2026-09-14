@@ -321,7 +321,6 @@ if st.session_state["ruolo"] == "operatore":
         return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
                (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
 
-    # Condizione Turno Attivo
     condizione_attivo = (
         (turni_miei['data_dt'].notna()) & 
         (
@@ -330,19 +329,45 @@ if st.session_state["ruolo"] == "operatore":
         )
     )
 
-    # 1. SCHEDA TURNI ATTIVI
+    # 1. SCHEDA TURNI ATTIVI (BLOCCATO GIORNO PER GIORNO)
     with tab_attivi:
         turni_attivi = turni_miei[condizione_attivo].copy()
-        turni_attivi = turni_attivi.sort_values(by='data_dt', ascending=True)
+        
+        # Ordinamento fisso: Data -> Ora Inizio -> ID Turno (non si muove dopo la firma)
+        turni_attivi = turni_attivi.sort_values(
+            by=['data_dt', 'ora_inizio_prevista', 'id_turno'], 
+            ascending=[True, True, True]
+        )
 
         if turni_attivi.empty:
             st.success("🎉 Nessun turno programmato da svolgere nelle date odierne o future.")
         else:
+            giorni_it = {
+                0: "Lunedì", 1: "Martedì", 2: "Mercoledì", 3: "Giovedì",
+                4: "Venerdì", 5: "Sabato", 6: "Domenica"
+            }
+            giorno_precedente = None
+            
             for _, t in turni_attivi.iterrows():
+                d_attuale = t.get('data_dt')
+                
+                # Sezione fissa per ogni singola data
+                if d_attuale != giorno_precedente:
+                    giorno_precedente = d_attuale
+                    if pd.notna(d_attuale):
+                        nome_g = giorni_it.get(d_attuale.weekday(), "")
+                        d_label = f"{nome_g} {d_attuale.strftime('%d/%m/%Y')}"
+                        if d_attuale == oggi:
+                            d_label += " (OGGI)"
+                    else:
+                        d_label = "Data Non Riconosciuta"
+                    st.markdown(f"### 🗓️ Turni di {d_label}")
+                    st.markdown("---")
+
                 id_t = str(t['id_turno']).strip()
                 id_p = str(t.get('id_postazione', '')).strip()
                 d_mostrata = t.get('data', 'Data N/D')
-                data_oggettiva = t.get('data_dt') if pd.notna(t.get('data_dt')) else data_italiana()
+                data_oggettiva = d_attuale if pd.notna(d_attuale) else data_italiana()
                 ora_ini = t.get('ora_inizio_prevista', '-')
                 ora_fin = t.get('ora_fine_prevista', '-')
                 c_in = t.get('check_in_effettivo', '')
@@ -683,7 +708,7 @@ if st.session_state["ruolo"] == "admin":
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
                             "email": nuova_email.strip(),
-                            "password": nuova_pwd.strip()
+                            "password": nuovo_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
