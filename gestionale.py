@@ -123,13 +123,11 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
-# --- SALVATAGGIO FOTO CON NOME POSTAZIONE REALE E STRUTTURA REALE ---
+# --- SALVATAGGIO FOTO CON NOME POSTAZIONE REALE ---
 def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
     cartella_data = giorno_str
-    
-    # Usa il nome reale della postazione (es. La_Balzana) anziché l'ID (es. P001)
     cartella_posizione = pulisci_nome(nome_postazione)
     
     data_ora_scatto = ora_italiana()
@@ -137,8 +135,6 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
     gps_info = "41.229565_14.508582"
     
     nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.jpg"
-    
-    # Percorso esatto che forza la creazione delle cartelle reali nel bucket Supabase
     path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
     
     file_bytes = file_foto.getvalue()
@@ -397,7 +393,6 @@ if st.session_state["ruolo"] == "operatore":
                         st.write(f"**Check-in:** {f'✅ {c_in}' if pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None' else '⏳ Da effettuare'}")
                         st.write(f"**Check-out:** {f'✅ {c_out}' if pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None' else '⏳ Da effettuare'}")
 
-                    # Verifiche stato timbrature per disabilitare i pulsanti se già fatti
                     gia_fatto_in = pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None'
                     gia_fatto_out = pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None'
 
@@ -411,6 +406,7 @@ if st.session_state["ruolo"] == "operatore":
                         with tab_in:
                             if gia_fatto_in:
                                 st.success(f"✅ Check-in già registrato con successo in data {c_in}.")
+                                st.button("✅ Check-in già eseguito", disabled=True, key=f"btn_dis_in_{id_t}", use_container_width=True)
                             else:
                                 with st.form(f"form_in_{id_t}"):
                                     st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
@@ -429,12 +425,13 @@ if st.session_state["ruolo"] == "operatore":
 
                                         supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
                                         registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
-                                        st.success("✅ Check-in registrato con successo! Il tasto è ora disabilitato.")
-                                        st.rer() if hasattr(st, "rerun") else st.experimental_rerun()
+                                        st.success("✅ Check-in registrato con successo!")
+                                        st.rerun()
 
                         with tab_out:
                             if gia_fatto_out:
                                 st.success(f"✅ Check-out già registrato con successo in data {c_out}.")
+                                st.button("🔴 Check-out già eseguito", disabled=True, key=f"btn_dis_out_{id_t}", use_container_width=True)
                             else:
                                 with st.form(f"form_out_{id_t}"):
                                     st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
@@ -454,7 +451,7 @@ if st.session_state["ruolo"] == "operatore":
                                         supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
                                         registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
                                         st.success("✅ Check-out completato con successo! Il turno è ora nello Storico.")
-                                        st.rer() if hasattr(st, "rerun") else st.experimental_rerun()
+                                        st.rerun()
 
                         with tab_extra:
                             st.info("Carica ulteriori foto di controllo o verbali per questo turno. Verranno salvate nella tua cartella personale.")
@@ -512,7 +509,7 @@ if st.session_state["ruolo"] == "operatore":
         mie_foto = df_turni[
             ((df_turni['id_guardia'] == op['id']) | (df_turni['cognome_guardia'] == op['cognome'])) & 
             (df_turni['foto_postazione'].notna()) & 
-            (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
+            (df_turni['foto_postazione'] != '')
         ]
         if not mie_foto.empty:
             cols = st.columns(3)
