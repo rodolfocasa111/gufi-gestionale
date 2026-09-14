@@ -726,24 +726,28 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD
+   # 7. FOTO CLOUD
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage")
-        foto_turni = df_turni[(df_turni['foto_postazione'].notna()) & (df_turni['foto_postazione'] != '')]
+        
+        # Filtra solo i turni che hanno un link web valido (http:// o https://)
+        foto_turni = df_turni[
+            (df_turni['foto_postazione'].notna()) & 
+            (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
+        ]
+        
         if not foto_turni.empty:
             cols = st.columns(3)
             for idx_f, (_, r_f) in enumerate(foto_turni.iterrows()):
                 with cols[idx_f % 3]:
-                    st.image(r_f['foto_postazione'], caption=f"{r_f['cognome_guardia']} - {r_f['id_postazione']} ({r_f['data']})", use_container_width=True)
+                    try:
+                        st.image(
+                            r_f['foto_postazione'], 
+                            caption=f"{r_f['cognome_guardia']} - {r_f['id_postazione']} ({r_f['data']})", 
+                            use_container_width=True
+                        )
+                    except Exception:
+                        st.warning(f"Immagine non caricabile per turno {r_f.get('id_turno')}")
         else:
-            st.info("Nessuna foto ancora registrata nel database.")
-
-    # 8. AUDIT LOG
-    elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
-        st.subheader("🛡️ Storico Azioni Capi Reparto (Supabase Audit)")
-        res_log = supabase.table("audit_log").select("*").order("id", desc=True).limit(200).execute()
-        df_log = pd.DataFrame(res_log.data)
-        if not df_log.empty:
-            st.dataframe(df_log[['data_ora', 'autore', 'azione', 'dettagli']], use_container_width=True)
-        else:
-            st.info("Nessun log presente.")
+            st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud.")
+            st.caption("I turni storici migrati da CSV contenevano percorsi a file locali del vecchio computer.")
