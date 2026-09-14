@@ -123,12 +123,24 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
-# --- SALVATAGGIO FOTO ---
-def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
+# --- SALVATAGGIO FOTO CON STRUTTURA GERARCHICA RICHIESTA ---
+def salva_foto_su_storage(file_foto, giorno_data, id_postazione, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
+    # Struttura: Nome_Operatore / Data / Posizione / Dettagli_File
+    cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
+    
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
-    timestamp = ora_italiana().strftime('%H%M%S')
-    nome_file = f"{pulisci_nome(id_turno)}_{tipo_timbratura}_{timestamp}.jpg"
-    path_remoto = f"{giorno_str}/{pulisci_nome(id_postazione)}/{pulisci_nome(id_guardia)}_{pulisci_nome(nome_guardia)}/{nome_file}"
+    cartella_data = giorno_str
+    
+    cartella_posizione = pulisci_nome(f"{id_postazione}_{nome_postazione}")
+    
+    data_ora_scatto = ora_italiana()
+    orario_str = data_ora_scatto.strftime('%H-%M-%S')
+    gps_info = "41.229565_14.508582"
+    
+    # Nome file descrittivo con dettagli incorporati
+    nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.jpg"
+    
+    path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
     
     file_bytes = file_foto.getvalue()
     try:
@@ -327,7 +339,7 @@ if st.session_state["ruolo"] == "operatore":
         (~turni_miei.apply(turno_completato, axis=1))
     )
 
-    # 1. SCHEDA TURNI ATTIVI (BLOCCATO GIORNO PER GIORNO)
+    # 1. SCHEDA TURNI ATTIVI
     with tab_attivi:
         turni_attivi = turni_miei[condizione_attivo].copy()
         
@@ -402,7 +414,7 @@ if st.session_state["ruolo"] == "operatore":
                                         "registrato_da": f"{op['nome']} (Check-in)"
                                     }
                                     if foto_in:
-                                        foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, op['id'], op['nome'], id_t, "IN")
+                                        foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, nome_posto, op['id'], op['nome'], id_t, "IN")
                                         update_data["foto_postazione"] = foto_url
 
                                     supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
@@ -423,7 +435,7 @@ if st.session_state["ruolo"] == "operatore":
                                         "registrato_da": f"{op['nome']} (Check-out)"
                                     }
                                     if foto_out:
-                                        foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, op['id'], op['nome'], id_t, "OUT")
+                                        foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, nome_posto, op['id'], op['nome'], id_t, "OUT")
                                         update_data["foto_postazione"] = foto_url
 
                                     supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
