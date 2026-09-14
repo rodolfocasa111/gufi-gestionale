@@ -321,26 +321,27 @@ if st.session_state["ruolo"] == "operatore":
         return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
                (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
 
+    # CONDIZIONE TURNI DA SVOLGERE:
+    # 1. Deve essere di oggi o futuro (o al massimo ieri)
+    # 2. MA NON DEVE ESSERE COMPLETATO (appena si completa al 100%, scompare da qui e va nello storico!)
     condizione_attivo = (
         (turni_miei['data_dt'].notna()) & 
-        (
-            (turni_miei['data_dt'] >= oggi) |
-            ((turni_miei['data_dt'] >= limite_aperti_recenti) & (~turni_miei.apply(turno_completato, axis=1)))
-        )
+        (turni_miei['data_dt'] >= limite_aperti_recenti) & 
+        (~turni_miei.apply(turno_completato, axis=1))
     )
 
     # 1. SCHEDA TURNI ATTIVI (BLOCCATO GIORNO PER GIORNO)
     with tab_attivi:
         turni_attivi = turni_miei[condizione_attivo].copy()
         
-        # Ordinamento fisso: Data -> Ora Inizio -> ID Turno (non si muove dopo la firma)
+        # Ordinamento fisso: Data -> Ora Inizio -> ID Turno
         turni_attivi = turni_attivi.sort_values(
             by=['data_dt', 'ora_inizio_prevista', 'id_turno'], 
             ascending=[True, True, True]
         )
 
         if turni_attivi.empty:
-            st.success("🎉 Nessun turno programmato da svolgere nelle date odierne o future.")
+            st.success("🎉 Non ci sono turni da completare! Tutti i turni svolti sono stati archiviati regolarmente nello Storico.")
         else:
             giorni_it = {
                 0: "Lunedì", 1: "Martedì", 2: "Mercoledì", 3: "Giovedì",
@@ -351,7 +352,7 @@ if st.session_state["ruolo"] == "operatore":
             for _, t in turni_attivi.iterrows():
                 d_attuale = t.get('data_dt')
                 
-                # Sezione fissa per ogni singola data
+                # Intestazione bloccata per ogni singola data
                 if d_attuale != giorno_precedente:
                     giorno_precedente = d_attuale
                     if pd.notna(d_attuale):
@@ -390,56 +391,53 @@ if st.session_state["ruolo"] == "operatore":
                         st.write(f"**Check-in:** {f'✅ {c_in}' if pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None' else '⏳ Da effettuare'}")
                         st.write(f"**Check-out:** {f'✅ {c_out}' if pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None' else '⏳ Da effettuare'}")
 
-                    if not turno_completato(t):
-                        with st.expander(f"✍️ Timbra Servizio o Carica Foto Turno {id_t}"):
-                            tab_in, tab_out = st.tabs(["🟢 Registra Check-in (Entrata)", "🔴 Registra Check-out (Uscita)"])
-                            
-                            with tab_in:
-                                with st.form(f"form_in_{id_t}"):
-                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
-                                    foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
-                                    
-                                    if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
-                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
-                                        update_data = {
-                                            "check_in_effettivo": ad_str,
-                                            "gps_check_in": "41.229565, 14.508582",
-                                            "registrato_da": f"{op['nome']} (Check-in)"
-                                        }
-                                        if foto_in:
-                                            foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, op['id'], op['nome'], id_t, "IN")
-                                            update_data["foto_postazione"] = foto_url
+                    with st.expander(f"✍️ Timbra Servizio o Carica Foto Turno {id_t}"):
+                        tab_in, tab_out = st.tabs(["🟢 Registra Check-in (Entrata)", "🔴 Registra Check-out (Uscita)"])
+                        
+                        with tab_in:
+                            with st.form(f"form_in_{id_t}"):
+                                st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
+                                foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
+                                
+                                if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
+                                    ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
+                                    update_data = {
+                                        "check_in_effettivo": ad_str,
+                                        "gps_check_in": "41.229565, 14.508582",
+                                        "registrato_da": f"{op['nome']} (Check-in)"
+                                    }
+                                    if foto_in:
+                                        foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, op['id'], op['nome'], id_t, "IN")
+                                        update_data["foto_postazione"] = foto_url
 
-                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                        registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
-                                        st.success("Check-in salvato!")
-                                        st.rerun()
+                                    supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
+                                    registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
+                                    st.success("Check-in salvato!")
+                                    st.rerun()
 
-                            with tab_out:
-                                with st.form(f"form_out_{id_t}"):
-                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
-                                    foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
-                                    
-                                    if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
-                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
-                                        update_data = {
-                                            "check_out_effettivo": ad_str,
-                                            "gps_check_out": "41.229565, 14.508582",
-                                            "registrato_da": f"{op['nome']} (Check-out)"
-                                        }
-                                        if foto_out:
-                                            foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, op['id'], op['nome'], id_t, "OUT")
-                                            update_data["foto_postazione"] = foto_url
+                        with tab_out:
+                            with st.form(f"form_out_{id_t}"):
+                                st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
+                                foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
+                                
+                                if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
+                                    ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
+                                    update_data = {
+                                        "check_out_effettivo": ad_str,
+                                        "gps_check_out": "41.229565, 14.508582",
+                                        "registrato_da": f"{op['nome']} (Check-out)"
+                                    }
+                                    if foto_out:
+                                        foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, op['id'], op['nome'], id_t, "OUT")
+                                        update_data["foto_postazione"] = foto_url
 
-                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                        registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
-                                        st.success("Check-out salvato!")
-                                        st.rerun()
-                    else:
-                        st.info("✅ Turno completato e chiuso regolarmente.")
+                                    supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
+                                    registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
+                                    st.success("Check-out completato! Il turno ora è archiviato nello Storico.")
+                                    st.rerun()
                     st.markdown("---")
 
-    # 2. SCHEDA STORICO COMPLETO PASSATI
+    # 2. SCHEDA STORICO COMPLETO PASSATI (TUTTI I TURNI COMPLETATI O DEL PASSATO)
     with tab_storico:
         st.subheader("📜 Storico Completo dei Tuoi Turni")
         turni_passati = turni_miei[~condizione_attivo].copy()
@@ -707,8 +705,8 @@ if st.session_state["ruolo"] == "admin":
                             "id_guardia": nuovo_id_g.strip(),
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
-                            "email": nuova_email.strip(),
-                            "password": nuovo_pwd.strip()
+                            "email":欖thought
+                "password": nuova_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
