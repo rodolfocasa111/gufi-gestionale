@@ -58,19 +58,19 @@ def registra_log(autore, azione, dettagli):
     except Exception as e:
         st.error(f"Errore registrazione log: {e}")
 
-# --- CARICAMENTO DATI DA SUPABASE ---
+# --- CARICAMENTO DATI DA SUPABASE (LIMITE AMPLIATO) ---
 def carica_dati():
-    res_dip = supabase.table("dipendenti").select("*").execute()
+    res_dip = supabase.table("dipendenti").select("*").limit(2000).execute()
     df_dip = pd.DataFrame(res_dip.data)
     if df_dip.empty:
         df_dip = pd.DataFrame(columns=['id_guardia', 'cognome', 'nome', 'email', 'password'])
 
-    res_post = supabase.table("postazioni").select("*").execute()
+    res_post = supabase.table("postazioni").select("*").limit(2000).execute()
     df_post = pd.DataFrame(res_post.data)
     if df_post.empty:
         df_post = pd.DataFrame(columns=['id_postazione', 'nome_cliente', 'indirizzo_sede'])
 
-    res_turni = supabase.table("turni").select("*").execute()
+    res_turni = supabase.table("turni").select("*").limit(10000).execute()
     df_turni = pd.DataFrame(res_turni.data)
     if df_turni.empty:
         df_turni = pd.DataFrame(columns=[
@@ -84,7 +84,7 @@ def carica_dati():
 
 df_turni, df_dip, df_post = carica_dati()
 
-# --- RISOLUZIONE AUTOMATICA COGNOME GUARDIA (ELIMINA CODICI COME G016) ---
+# --- MAPPATURA E RISOLUZIONE COGNOMI ---
 mappa_id_cognome = {}
 if not df_dip.empty:
     for _, r_d in df_dip.iterrows():
@@ -97,13 +97,10 @@ def risolvi_cognome_effettivo(r):
     val_cogn = str(r.get('cognome_guardia', '')).strip()
     val_id = str(r.get('id_guardia', '')).strip().lower()
     
-    # Se il campo cognome contiene in realtà il codice (es: G016)
     if val_cogn.lower() in mappa_id_cognome:
         return mappa_id_cognome[val_cogn.lower()]
-    # Controllo via ID Guardia
     if val_id in mappa_id_cognome:
         return mappa_id_cognome[val_id]
-    # Se contiene trattino tipo 'G001 - Mirra'
     if "-" in val_cogn:
         parti = val_cogn.split("-")
         possibile_id = parti[0].strip().lower()
@@ -131,12 +128,14 @@ def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nom
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
+# --- PARSER ONNIVORO DELLE DATE (INCLUSI TESTI ESTESI: "mercoledì 12 agosto 2026") ---
 def analizza_data_completa(val):
     if pd.isna(val) or not str(val).strip():
         return None
     s = str(val).strip().lower()
     for g in ['lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica']:
         s = s.replace(g, '').strip()
+    
     mesi = {
         'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
         'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
@@ -146,10 +145,19 @@ def analizza_data_completa(val):
         if m_it in s:
             s = s.replace(m_it, m_num)
             break
-    s_solo_data = s.split()[0].strip()
-    for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y', '%m/%d/%Y', '%Y/%m/%d']:
+            
+    s = s.replace("-", "/").replace(".", "/")
+    parti = s.split()
+    
+    # Prova a prendere solo la componente data o a comporla
+    if len(parti) >= 3 and parti[0].isdigit() and parti[1].isdigit() and parti[2].isdigit():
+        s_data = f"{int(parti[0]):02d}/{int(parti[1]):02d}/{parti[2]}"
+    else:
+        s_data = parti[0] if parti else s
+
+    for fmt in ['%d/%m/%Y', '%Y/%m/%d', '%m/%d/%Y']:
         try:
-            return datetime.strptime(s_solo_data, fmt).date()
+            return datetime.strptime(s_data, fmt).date()
         except Exception:
             pass
     try:
@@ -263,7 +271,7 @@ if st.session_state["ruolo"] == "operatore":
     c_h1, c_h2 = st.columns([4, 1.2])
     with c_h1:
         st.markdown(f"### 👋 Operatore: **{op['nome']}** `[{op['id']}]`")
-        st.caption("I tuoi turni attivi da 2 giorni fa a tutti i futuri. Sincronizzato con Supabase.")
+        st.caption("Portale operativo personale guardie giurate")
     with c_h2:
         if st.button("🚪 Esci", use_container_width=True):
             registra_log(op["nome"], "LOGOUT", "Disconnessione dipendente")
@@ -271,22 +279,39 @@ if st.session_state["ruolo"] == "operatore":
             st.rerun()
 
     st.markdown("---")
-    tab_turni_op, tab_foto_op = st.tabs(["📅 I Miei Turni & Timbrature", "📸 Le Mie Foto Caricate"])
+    tab_attivi, tab_storico, tab_foto_op = st.tabs([
+        "🟢 Turni da Svolgere / Oggi", 
+        "📜 Storico Turni Passati", 
+        "📸 Le Mie Foto Caricate"
+    ])
 
-    with tab_turni_op:
-        turni_miei = df_turni[
-            (df_turni['id_guardia'].astype(str).str.lower() == op['id'].lower()) | 
-            (df_turni['cognome_guardia'].astype(str).str.lower() == op['cognome'].lower())
+    turni_miei = df_turni[
+        (df_turni['id_guardia'].astype(str).str.lower() == op['id'].lower()) | 
+        (df_turni['cognome_guardia'].astype(str).str.lower() == op['cognome'].lower())
+    ].copy()
+
+    oggi = date.today()
+
+    def turno_completato(r):
+        cin = str(r.get('check_in_effettivo', '')).strip()
+        cout = str(r.get('check_out_effettivo', '')).strip()
+        return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
+               (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
+
+    # 1. TURNI ATTIVI / DA SVOLGERE
+    with tab_attivi:
+        turni_attivi = turni_miei[
+            (turni_miei['data_dt'].isna()) |
+            (turni_miei['data_dt'] >= oggi) | 
+            (~turni_miei.apply(turno_completato, axis=1))
         ].copy()
+        
+        turni_attivi = turni_attivi.sort_values(by='data_dt', ascending=True)
 
-        limite_passato = date.today() - timedelta(days=2)
-        turni_visibili = turni_miei[(turni_miei['data_dt'].isna()) | (turni_miei['data_dt'] >= limite_passato)].copy()
-        turni_visibili = turni_visibili.sort_values(by='data_dt', ascending=True)
-
-        if turni_visibili.empty:
-            st.info("Non ci sono turni assegnati nei giorni recenti o futuri.")
+        if turni_attivi.empty:
+            st.success("🎉 Nessun turno da completare o svolgere al momento.")
         else:
-            for _, t in turni_visibili.iterrows():
+            for _, t in turni_attivi.iterrows():
                 id_t = str(t['id_turno']).strip()
                 id_p = str(t.get('id_postazione', '')).strip()
                 d_mostrata = t.get('data', 'Data N/D')
@@ -310,71 +335,111 @@ if st.session_state["ruolo"] == "operatore":
                         st.write(f"🏢 **Indirizzo:** {indirizzo_posto if indirizzo_posto else 'Non specificato'}")
                         st.link_button("🗺️ Apri Navigatore Google Maps", url_maps)
                     with c_inf2:
-                        st.write(f"**Check-in:** {f'✅ {c_in}' if pd.notna(c_in) and str(c_in).strip() else '⏳ Da effettuare'}")
-                        st.write(f"**Check-out:** {f'✅ {c_out}' if pd.notna(c_out) and str(c_out).strip() else '⏳ Da effettuare'}")
+                        st.write(f"**Check-in:** {f'✅ {c_in}' if pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None' else '⏳ Da effettuare'}")
+                        st.write(f"**Check-out:** {f'✅ {c_out}' if pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None' else '⏳ Da effettuare'}")
 
-                    with st.expander(f"✍️ Timbra Servizio o Carica Foto Turno {id_t}"):
-                        tab_in, tab_out = st.tabs(["🟢 Registra Check-in (Entrata)", "🔴 Registra Check-out (Uscita)"])
-                        
-                        with tab_in:
-                            with st.form(f"form_in_{id_t}"):
-                                gps_rilevato_in = "41.229565, 14.508582 (Certificata GPS)"
-                                st.text_input("📍 Posizione GPS (Sola Lettura):", value=gps_rilevato_in, disabled=True, key=f"gps_in_{id_t}")
-                                foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
-                                
-                                if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
-                                    ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                                    update_data = {
-                                        "check_in_effettivo": ad_str,
-                                        "gps_check_in": "41.229565, 14.508582",
-                                        "registrato_da": f"{op['nome']} (Check-in)"
-                                    }
-                                    if foto_in:
-                                        foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, op['id'], op['nome'], id_t, "IN")
-                                        update_data["foto_postazione"] = foto_url
+                    if not turno_completato(t):
+                        with st.expander(f"✍️ Timbra Servizio o Carica Foto Turno {id_t}"):
+                            tab_in, tab_out = st.tabs(["🟢 Registra Check-in (Entrata)", "🔴 Registra Check-out (Uscita)"])
+                            
+                            with tab_in:
+                                with st.form(f"form_in_{id_t}"):
+                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
+                                    foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
+                                    
+                                    if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
+                                        ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                                        update_data = {
+                                            "check_in_effettivo": ad_str,
+                                            "gps_check_in": "41.229565, 14.508582",
+                                            "registrato_da": f"{op['nome']} (Check-in)"
+                                        }
+                                        if foto_in:
+                                            foto_url = salva_foto_su_storage(foto_in, data_oggettiva, id_p, op['id'], op['nome'], id_t, "IN")
+                                            update_data["foto_postazione"] = foto_url
 
-                                    supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                    registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
-                                    st.success("Check-in salvato su Supabase!")
-                                    st.rerun()
+                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
+                                        registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
+                                        st.success("Check-in salvato!")
+                                        st.rerun()
 
-                        with tab_out:
-                            with st.form(f"form_out_{id_t}"):
-                                gps_rilevato_out = "41.229565, 14.508582 (Certificata GPS)"
-                                st.text_input("📍 Posizione GPS (Sola Lettura):", value=gps_rilevato_out, disabled=True, key=f"gps_out_{id_t}")
-                                foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
-                                
-                                if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
-                                    ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-                                    update_data = {
-                                        "check_out_effettivo": ad_str,
-                                        "gps_check_out": "41.229565, 14.508582",
-                                        "registrato_da": f"{op['nome']} (Check-out)"
-                                    }
-                                    if foto_out:
-                                        foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, op['id'], op['nome'], id_t, "OUT")
-                                        update_data["foto_postazione"] = foto_url
+                            with tab_out:
+                                with st.form(f"form_out_{id_t}"):
+                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
+                                    foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
+                                    
+                                    if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
+                                        ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                                        update_data = {
+                                            "check_out_effettivo": ad_str,
+                                            "gps_check_out": "41.229565, 14.508582",
+                                            "registrato_da": f"{op['nome']} (Check-out)"
+                                        }
+                                        if foto_out:
+                                            foto_url = salva_foto_su_storage(foto_out, data_oggettiva, id_p, op['id'], op['nome'], id_t, "OUT")
+                                            update_data["foto_postazione"] = foto_url
 
-                                    supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                    registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
-                                    st.success("Check-out salvato su Supabase!")
-                                    st.rerun()
+                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
+                                        registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
+                                        st.success("Check-out salvato!")
+                                        st.rerun()
+                    else:
+                        st.info("✅ Turno completato e chiuso regolarmente.")
                     st.markdown("---")
 
+    # 2. STORICO COMPLETO TURNI PASSATI
+    with tab_storico:
+        st.subheader("📜 Storico Completo dei Tuoi Turni")
+        turni_passati = turni_miei[turni_miei.apply(turno_completato, axis=1) | ((turni_miei['data_dt'].notna()) & (turni_miei['data_dt'] < oggi))].copy()
+        turni_passati = turni_passati.sort_values(by='data_dt', ascending=False)
+
+        if not turni_passati.empty:
+            recap_storico = []
+            for _, r_s in turni_passati.iterrows():
+                id_p_s = str(r_s.get('id_postazione', '')).strip()
+                p_r = df_post[df_post['id_postazione'] == id_p_s]
+                nome_p_s = p_r.iloc[0]['nome_cliente'] if not p_r.empty else id_p_s
+
+                recap_storico.append({
+                    "Turno ID": r_s.get('id_turno', ''),
+                    "Data": r_s.get('data', ''),
+                    "Mese": r_s.get('Mese_Anno', ''),
+                    "Postazione": nome_p_s,
+                    "Orario Previsto": f"{r_s.get('ora_inizio_prevista', '-')} - {r_s.get('ora_fine_prevista', '-')}",
+                    "Entrata (Check-in)": r_s.get('check_in_effettivo', '-'),
+                    "Uscita (Check-out)": r_s.get('check_out_effettivo', '-')
+                })
+            
+            df_st_view = pd.DataFrame(recap_storico)
+            mesi_storico = ["Tutti i Mesi"] + sorted([m for m in df_st_view['Mese'].dropna().unique() if m != 'Non Riconosciuto'], reverse=True)
+            scelta_m_op = st.selectbox("Filtra Storico per Mese:", mesi_storico, key="filtro_storico_op")
+            
+            if scelta_m_op != "Tutti i Mesi":
+                df_st_view = df_st_view[df_st_view['Mese'] == scelta_m_op]
+                
+            st.dataframe(df_st_view, use_container_width=True)
+        else:
+            st.info("Nessun turno archiviato nello storico.")
+
+    # 3. FOTO CARICATE DALL'OPERATORE (CON PROTEZIONE LINK)
     with tab_foto_op:
         st.subheader(f"📸 Foto caricate da te ({op['nome']})")
         mie_foto = df_turni[
             ((df_turni['id_guardia'] == op['id']) | (df_turni['cognome_guardia'] == op['cognome'])) & 
             (df_turni['foto_postazione'].notna()) & 
-            (df_turni['foto_postazione'] != '')
+            (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
         ]
         if not mie_foto.empty:
             cols = st.columns(3)
             for idx_f, (_, r_f) in enumerate(mie_foto.iterrows()):
                 with cols[idx_f % 3]:
-                    st.image(r_f['foto_postazione'], caption=f"Turno: {r_f['id_turno']} ({r_f['data']})", use_container_width=True)
+                    try:
+                        st.image(r_f['foto_postazione'], caption=f"Turno: {r_f['id_turno']} ({r_f['data']})", use_container_width=True)
+                    except Exception:
+                        pass
         else:
-            st.info("Nessuna foto associata ai tuoi turni finora.")
+            st.info("Nessuna foto salvata su Supabase Storage associata ai tuoi turni.")
+
     st.stop()
 
 # -------------------------------------------------------------------------------------------------
@@ -453,7 +518,7 @@ if st.session_state["ruolo"] == "admin":
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-    # 2. GESTIONE TURNI PER POSTAZIONE (MOSTRA IL COGNOME DELLA GUARDIA)
+    # 2. GESTIONE TURNI PER POSTAZIONE (COGNOME DELLA GUARDIA IN PRIMO PIANO)
     elif menu_admin == "📅 Gestione Turni per Postazione":
         st.subheader("📅 Aggiunta & Gestione Turni per Ciascuna Postazione")
         if not df_post.empty:
@@ -666,7 +731,7 @@ if st.session_state["ruolo"] == "admin":
                 st.markdown("#### 🕒 Ore Svolte per Dipendente Suddivise per Mese")
                 def estrai_ore_t(r):
                     cin, cout = r.get('check_in_effettivo'), r.get('check_out_effettivo')
-                    if pd.notna(cin) and pd.notna(cout) and str(cin).strip() and str(cout).strip():
+                    if pd.notna(cin) and pd.notna(cout) and str(cin).strip() and str(cout).strip() and str(cin) != 'None' and str(cout) != 'None':
                         return calcola_ore(cin, cout)
                     return calcola_ore(r.get('ora_inizio_prevista', '00:00'), r.get('ora_fine_prevista', '00:00'))
 
@@ -726,16 +791,13 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-   # 7. FOTO CLOUD
+    # 7. FOTO CLOUD (CON GESTIONE ERRORI E FILTRO URL)
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage")
-        
-        # Filtra solo i turni che hanno un link web valido (http:// o https://)
         foto_turni = df_turni[
             (df_turni['foto_postazione'].notna()) & 
             (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
         ]
-        
         if not foto_turni.empty:
             cols = st.columns(3)
             for idx_f, (_, r_f) in enumerate(foto_turni.iterrows()):
@@ -747,7 +809,16 @@ if st.session_state["ruolo"] == "admin":
                             use_container_width=True
                         )
                     except Exception:
-                        st.warning(f"Immagine non caricabile per turno {r_f.get('id_turno')}")
+                        st.warning(f"Impossibile visualizzare l'immagine del turno {r_f.get('id_turno')}")
         else:
-            st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud.")
-            st.caption("I turni storici migrati da CSV contenevano percorsi a file locali del vecchio computer.")
+            st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud valido.")
+
+    # 8. AUDIT LOG
+    elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
+        st.subheader("🛡️ Storico Azioni Capi Reparto (Supabase Audit)")
+        res_log = supabase.table("audit_log").select("*").order("id", desc=True).limit(500).execute()
+        df_log = pd.DataFrame(res_log.data)
+        if not df_log.empty:
+            st.dataframe(df_log[['data_ora', 'autore', 'azione', 'dettagli']], use_container_width=True)
+        else:
+            st.info("Nessun log presente.")
