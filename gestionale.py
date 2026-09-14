@@ -321,9 +321,6 @@ if st.session_state["ruolo"] == "operatore":
         return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
                (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
 
-    # CONDIZIONE TURNI DA SVOLGERE:
-    # 1. Deve essere di oggi o futuro (o al massimo ieri)
-    # 2. MA NON DEVE ESSERE COMPLETATO (appena si completa al 100%, scompare da qui e va nello storico!)
     condizione_attivo = (
         (turni_miei['data_dt'].notna()) & 
         (turni_miei['data_dt'] >= limite_aperti_recenti) & 
@@ -334,7 +331,6 @@ if st.session_state["ruolo"] == "operatore":
     with tab_attivi:
         turni_attivi = turni_miei[condizione_attivo].copy()
         
-        # Ordinamento fisso: Data -> Ora Inizio -> ID Turno
         turni_attivi = turni_attivi.sort_values(
             by=['data_dt', 'ora_inizio_prevista', 'id_turno'], 
             ascending=[True, True, True]
@@ -352,7 +348,6 @@ if st.session_state["ruolo"] == "operatore":
             for _, t in turni_attivi.iterrows():
                 d_attuale = t.get('data_dt')
                 
-                # Intestazione bloccata per ogni singola data
                 if d_attuale != giorno_precedente:
                     giorno_precedente = d_attuale
                     if pd.notna(d_attuale):
@@ -437,7 +432,7 @@ if st.session_state["ruolo"] == "operatore":
                                     st.rerun()
                     st.markdown("---")
 
-    # 2. SCHEDA STORICO COMPLETO PASSATI (TUTTI I TURNI COMPLETATI O DEL PASSATO)
+    # 2. SCHEDA STORICO COMPLETO PASSATI
     with tab_storico:
         st.subheader("📜 Storico Completo dei Tuoi Turni")
         turni_passati = turni_miei[~condizione_attivo].copy()
@@ -705,8 +700,8 @@ if st.session_state["ruolo"] == "admin":
                             "id_guardia": nuovo_id_g.strip(),
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
-                            "email":欖thought
-                "password": nuova_pwd.strip()
+                            "email": nuova_email.strip(),
+                            "password": nuova_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
