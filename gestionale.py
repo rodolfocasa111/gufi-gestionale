@@ -4,10 +4,20 @@ import os
 import time
 import re
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import urllib.parse
 from supabase import create_client
 
 st.set_page_config(page_title="I Gufi della Notte - Gestione Turni", layout="wide", initial_sidebar_state="expanded")
+
+# --- GESTIONE FUSO ORARIO ITALIA ---
+FUSO_ITALIA = ZoneInfo("Europe/Rome")
+
+def ora_italiana():
+    return datetime.now(FUSO_ITALIA)
+
+def data_italiana():
+    return ora_italiana().date()
 
 # --- CONNESSIONE SUPABASE ---
 @st.cache_resource
@@ -47,7 +57,7 @@ def pulisci_nome(testo):
     return re.sub(r'[^a-zA-Z0-9_-]', '_', str(testo).strip())
 
 def registra_log(autore, azione, dettagli):
-    adesso_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    adesso_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
     try:
         supabase.table("audit_log").insert({
             "data_ora": adesso_str,
@@ -113,10 +123,10 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
-# --- SALVATAGGIO FOTO CON GESTIONE ERRORI ED ESISTENZA ---
+# --- SALVATAGGIO FOTO ---
 def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
-    giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else datetime.now().strftime("%Y-%m-%d")
-    timestamp = datetime.now().strftime('%H%M%S')
+    giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
+    timestamp = ora_italiana().strftime('%H%M%S')
     nome_file = f"{pulisci_nome(id_turno)}_{tipo_timbratura}_{timestamp}.jpg"
     path_remoto = f"{giorno_str}/{pulisci_nome(id_postazione)}/{pulisci_nome(id_guardia)}_{pulisci_nome(nome_guardia)}/{nome_file}"
     
@@ -141,7 +151,7 @@ def salva_foto_su_storage(file_foto, giorno_data, id_postazione, id_guardia, nom
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
-# --- PARSER DATA ROBUSTO ---
+# --- PARSER DATA COMPLETO ---
 def analizza_data_completa(val):
     if pd.isna(val) or not str(val).strip():
         return None
@@ -302,7 +312,7 @@ if st.session_state["ruolo"] == "operatore":
         (df_turni['cognome_guardia'].astype(str).str.lower() == op['cognome'].lower())
     ].copy()
 
-    oggi = date.today()
+    oggi = data_italiana()
     limite_aperti_recenti = oggi - timedelta(days=1)
 
     def turno_completato(r):
@@ -311,7 +321,7 @@ if st.session_state["ruolo"] == "operatore":
         return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
                (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
 
-    # Un turno è attivo solo se è di oggi/futuro, oppure di ieri se non ancora chiuso
+    # Condizione Turno Attivo
     condizione_attivo = (
         (turni_miei['data_dt'].notna()) & 
         (
@@ -320,7 +330,7 @@ if st.session_state["ruolo"] == "operatore":
         )
     )
 
-    # 1. TURNI ATTIVI
+    # 1. SCHEDA TURNI ATTIVI
     with tab_attivi:
         turni_attivi = turni_miei[condizione_attivo].copy()
         turni_attivi = turni_attivi.sort_values(by='data_dt', ascending=True)
@@ -332,7 +342,7 @@ if st.session_state["ruolo"] == "operatore":
                 id_t = str(t['id_turno']).strip()
                 id_p = str(t.get('id_postazione', '')).strip()
                 d_mostrata = t.get('data', 'Data N/D')
-                data_oggettiva = t.get('data_dt') if pd.notna(t.get('data_dt')) else date.today()
+                data_oggettiva = t.get('data_dt') if pd.notna(t.get('data_dt')) else data_italiana()
                 ora_ini = t.get('ora_inizio_prevista', '-')
                 ora_fin = t.get('ora_fine_prevista', '-')
                 c_in = t.get('check_in_effettivo', '')
@@ -365,7 +375,7 @@ if st.session_state["ruolo"] == "operatore":
                                     foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
                                     
                                     if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
-                                        ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
                                         update_data = {
                                             "check_in_effettivo": ad_str,
                                             "gps_check_in": "41.229565, 14.508582",
@@ -386,7 +396,7 @@ if st.session_state["ruolo"] == "operatore":
                                     foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
                                     
                                     if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
-                                        ad_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
                                         update_data = {
                                             "check_out_effettivo": ad_str,
                                             "gps_check_out": "41.229565, 14.508582",
@@ -404,7 +414,7 @@ if st.session_state["ruolo"] == "operatore":
                         st.info("✅ Turno completato e chiuso regolarmente.")
                     st.markdown("---")
 
-    # 2. STORICO PASSATI
+    # 2. SCHEDA STORICO COMPLETO PASSATI
     with tab_storico:
         st.subheader("📜 Storico Completo dei Tuoi Turni")
         turni_passati = turni_miei[~condizione_attivo].copy()
@@ -438,7 +448,7 @@ if st.session_state["ruolo"] == "operatore":
         else:
             st.info("Nessun turno archiviato nello storico.")
 
-    # 3. FOTO CARICATE
+    # 3. SCHEDA FOTO CARICATE
     with tab_foto_op:
         st.subheader(f"📸 Foto caricate da te ({op['nome']})")
         mie_foto = df_turni[
@@ -500,7 +510,7 @@ if st.session_state["ruolo"] == "admin":
             id_p_selezionato = map_p[scelta_p_str] if scelta_p_str else None
 
         with c_sel_d:
-            data_riferimento = st.date_input("Settimana contenente il giorno:", value=date.today())
+            data_riferimento = st.date_input("Settimana contenente il giorno:", value=data_italiana())
 
         if id_p_selezionato:
             inizio_sett = data_riferimento - timedelta(days=data_riferimento.weekday())
@@ -557,7 +567,7 @@ if st.session_state["ruolo"] == "admin":
                         c_t1, c_t2, c_t3 = st.columns(3)
                         with c_t1:
                             id_nuovo_t = st.text_input("ID Turno", value=f"T0{len(df_turni)+1}", key=f"id_t_{id_pst}")
-                            data_nuovo_t = st.date_input("Data Servizio", value=date.today(), key=f"d_t_{id_pst}")
+                            data_nuovo_t = st.date_input("Data Servizio", value=data_italiana(), key=f"d_t_{id_pst}")
                         with c_t2:
                             scelte_g = [f"{r['cognome']} {r['nome']} ({r['id_guardia']})" for _, r in df_dip.iterrows()] if not df_dip.empty else ["Mirra Girolamo (G001)"]
                             guardia_sel = st.selectbox("Dipendente Assegnato:", scelte_g, key=f"g_sel_{id_pst}")
@@ -673,7 +683,7 @@ if st.session_state["ruolo"] == "admin":
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
                             "email": nuova_email.strip(),
-                            "password": nuovo_pwd.strip()
+                            "password": nuova_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
