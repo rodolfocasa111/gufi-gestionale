@@ -123,7 +123,7 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
-# --- SALVATAGGIO FOTO CON NOME POSTAZIONE REALE ---
+# --- SALVATAGGIO FOTO CON STRUTTURA REALE ---
 def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
@@ -405,7 +405,7 @@ if st.session_state["ruolo"] == "operatore":
                         
                         with tab_in:
                             if gia_fatto_in:
-                                st.success(f"✅ Check-in già registrato con successo in data {c_in}.")
+                                st.success(f"✅ Check-in già registrato in data {c_in}.")
                                 st.button("✅ Check-in già eseguito", disabled=True, key=f"btn_dis_in_{id_t}", use_container_width=True)
                             else:
                                 with st.form(f"form_in_{id_t}"):
@@ -430,7 +430,7 @@ if st.session_state["ruolo"] == "operatore":
 
                         with tab_out:
                             if gia_fatto_out:
-                                st.success(f"✅ Check-out già registrato con successo in data {c_out}.")
+                                st.success(f"✅ Check-out già registrato in data {c_out}.")
                                 st.button("🔴 Check-out già eseguito", disabled=True, key=f"btn_dis_out_{id_t}", use_container_width=True)
                             else:
                                 with st.form(f"form_out_{id_t}"):
@@ -450,11 +450,11 @@ if st.session_state["ruolo"] == "operatore":
 
                                         supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
                                         registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
-                                        st.success("✅ Check-out completato con successo! Il turno è ora nello Storico.")
+                                        st.success("✅ Check-out completato con successo!")
                                         st.rerun()
 
                         with tab_extra:
-                            st.info("Carica ulteriori foto di controllo o verbali per questo turno. Verranno salvate nella tua cartella personale.")
+                            st.info("Carica ulteriori foto extra per questo turno nella tua cartella.")
                             with st.form(f"form_extra_{id_t}"):
                                 foto_extra = st.file_uploader("Seleziona Foto Extra:", type=["jpg", "jpeg", "png"], key=f"fextra_{id_t}")
                                 desc_extra = st.text_input("Nota / Dettaglio foto (opzionale):", value="Controllo_Extra")
@@ -463,9 +463,9 @@ if st.session_state["ruolo"] == "operatore":
                                     if foto_extra:
                                         salva_foto_su_storage(foto_extra, data_oggettiva, nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA")
                                         registra_log(op["nome"], "CARICAMENTO_FOTO_EXTRA", f"Turno {id_t} - {nome_posto}")
-                                        st.success("✅ Foto extra caricata correttamente nella cartella del turno!")
+                                        st.success("✅ Foto extra caricata correttamente!")
                                     else:
-                                        st.error("Seleziona prima un'immagine da caricare.")
+                                        st.error("Seleziona prima un'immagine.")
 
                     st.markdown("---")
 
@@ -550,6 +550,7 @@ if st.session_state["ruolo"] == "admin":
             "📍 Gestione Postazioni (Modifica/Aggiungi)",
             "💶 Piano Economico (Fatturato & Ore)",
             "📁 Foto Postazioni Cloud",
+            "🗑️ Gestione & Cancellazione (Turni & Foto)",
             "🛡️ Registro Modifiche (Audit Log)"
         ],
         label_visibility="collapsed"
@@ -914,7 +915,38 @@ if st.session_state["ruolo"] == "admin":
         else:
             st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud valido.")
 
-    # 8. AUDIT LOG
+    # 8. SEZIONE NUOVA: GESTIONE & CANCELLAZIONE (TURNI SELEZIONATI)
+    elif menu_admin == "🗑️ Gestione & Cancellazione (Turni & Foto)":
+        st.subheader("🗑️ Eliminazione Selettiva Turni")
+        st.warning("⚠️ Attenzione: la cancellazione dei turni dal database è irreversibile.")
+
+        if not df_turni.empty:
+            df_edit_del = df_turni.copy()
+            df_edit_del.insert(0, "Seleziona", False)
+            
+            # Mostra tabella interattiva con caselle di spunta
+            edited_df = st.data_editor(
+                df_edit_del[['Seleziona', 'id_turno', 'data', 'cognome_guardia', 'id_postazione', 'check_in_effettivo', 'check_out_effettivo']],
+                use_container_width=True,
+                hide_index=True
+            )
+
+            if st.button("🗑️ Elimina Turni Selezionati", type="primary"):
+                selezionati = edited_df[edited_df['Seleziona'] == True]
+                if not selezionati.empty:
+                    ids_da_eliminare = selezionati['id_turno'].tolist()
+                    for tid in ids_da_eliminare:
+                        supabase.table("turni").delete().eq("id_turno", tid).execute()
+                    
+                    registra_log(adm["nome"], "CANCELLAZIONE_TURNI", f"Eliminati turni: {ids_da_eliminare}")
+                    st.success(f"✅ Eliminati con successo {len(ids_da_eliminare)} turni dal database!")
+                    st.rerun()
+                else:
+                    st.info("Seleziona almeno un turno spuntando la casella corrispondente.")
+        else:
+            st.info("Nessun turno presente nel database.")
+
+    # 9. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
         st.subheader("🛡️ Storico Azioni Capi Reparto (Supabase Audit)")
         res_log = supabase.table("audit_log").select("*").order("id", desc=True).limit(500).execute()
