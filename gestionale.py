@@ -77,7 +77,9 @@ def carica_dati():
 
     res_post = supabase.table("postazioni").select("*").limit(2000).execute()
     df_post = pd.DataFrame(res_post.data)
-    if df_post.empty:
+    if not df_post.empty and 'id_postazione' in df_post.columns:
+        df_post = df_post.sort_values(by='id_postazione', ascending=True)
+    else:
         df_post = pd.DataFrame(columns=['id_postazione', 'nome_cliente', 'indirizzo_sede'])
 
     res_turni = supabase.table("turni").select("*").limit(10000).execute()
@@ -600,7 +602,7 @@ if st.session_state["ruolo"] == "admin":
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-    # 2. GESTIONE TURNI PER POSTAZIONE (CON CANCELLAZIONE SELETTIVA INTEGRATA)
+    # 2. GESTIONE TURNI PER POSTAZIONE
     elif menu_admin == "📅 Gestione Turni per Postazione":
         st.subheader("📅 Aggiunta & Gestione Turni per Ciascuna Postazione")
         if not df_post.empty:
@@ -644,7 +646,6 @@ if st.session_state["ruolo"] == "admin":
                     with st.form(f"form_add_turno_{id_pst}"):
                         c_t1, c_t2, c_t3 = st.columns(3)
                         with c_t1:
-                            # ID Turno generato automaticamente e univoco
                             id_nuovo_t = f"T{len(df_turni) + 101:04d}"
                             st.text_input("ID Turno (Generato Auto)", value=id_nuovo_t, disabled=True, key=f"id_t_{id_pst}")
                             data_nuovo_t = st.date_input("Data Servizio", value=data_italiana(), key=f"d_t_{id_pst}")
@@ -768,7 +769,7 @@ if st.session_state["ruolo"] == "admin":
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
                             "email": nuova_email.strip(),
-                            "password": nuova_pwd.strip()
+                            "password": nueva_pwd.strip() if 'nueva_pwd' in locals() elsenuova_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
@@ -777,17 +778,20 @@ if st.session_state["ruolo"] == "admin":
         st.markdown("#### Anagrafica Attiva")
         st.dataframe(df_dip[['id_guardia', 'cognome', 'nome', 'email', 'password']], use_container_width=True)
 
-    # 5. GESTIONE POSTAZIONI
+    # 5. GESTIONE POSTAZIONI (CON ELIMINAZIONE POSTAZIONE & ORDINAMENTO NUMERICO)
     elif menu_admin == "📍 Gestione Postazioni (Modifica/Aggiungi)":
         st.subheader("📍 Gestione Postazioni di Lavoro")
-        tab_mod_p, tab_agg_p = st.tabs(["✏️ Modifica Postazione Esistente", "➕ Aggiungi Nuova Postazione"])
+        tab_mod_p, tab_agg_p = st.tabs(["✏️ Modifica / Elimina Postazione Esistente", "➕ Aggiungi Nuova Postazione"])
 
         with tab_mod_p:
             if not df_post.empty:
-                map_mod_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post.iterrows()}
+                # Ordinamento per numero/ID postazione
+                df_post_sorted = df_post.sort_values(by='id_postazione', ascending=True)
+                map_mod_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post_sorted.iterrows()}
+                
                 scelta_p_mod = st.selectbox("Seleziona Postazione:", list(map_mod_p.keys()))
                 id_pst_sel = map_mod_p[scelta_p_mod]
-                riga_post = df_post[df_post['id_postazione'] == id_pst_sel].iloc[0]
+                riga_post = df_post_sorted[df_post_sorted['id_postazione'] == id_pst_sel].iloc[0]
 
                 with st.form(f"form_modifica_post_{id_pst_sel}"):
                     cp_m1, cp_m2 = st.columns(2)
@@ -796,13 +800,25 @@ if st.session_state["ruolo"] == "admin":
                     with cp_m2:
                         mod_ind_post = st.text_input("Indirizzo Completo (Google Maps):", value=str(riga_post.get('indirizzo_sede', '')))
 
-                    if st.form_submit_button("💾 Salva Modifiche su Cloud", type="primary"):
+                    c_salva, c_elimina = st.columns([1, 1])
+                    with c_salva:
+                        btn_salva_p = st.form_submit_button("💾 Salva Modifiche", type="primary", use_container_width=True)
+                    with c_elimina:
+                        btn_elimina_p = st.form_submit_button("🗑️ Elimina Postazione", type="secondary", use_container_width=True)
+
+                    if btn_salva_p:
                         supabase.table("postazioni").update({
                             "nome_cliente": mod_nome_post.strip(),
                             "indirizzo_sede": mod_ind_post.strip()
                         }).eq("id_postazione", id_pst_sel).execute()
                         registra_log(adm["nome"], "MODIFICA_POSTAZIONE", f"Aggiornata {mod_nome_post} ({id_pst_sel})")
                         st.success("Postazione aggiornata su Cloud!")
+                        st.rerun()
+
+                    if btn_elimina_p:
+                        supabase.table("postazioni").delete().eq("id_postazione", id_pst_sel).execute()
+                        registra_log(adm["nome"], "ELIMINAZIONE_POSTAZIONE", f"Eliminata postazione {id_pst_sel} - {riga_post.get('nome_cliente')}")
+                        st.success(f"Postazione {id_pst_sel} eliminata con successo!")
                         st.rerun()
 
         with tab_agg_p:
@@ -827,8 +843,8 @@ if st.session_state["ruolo"] == "admin":
                         st.success(f"Postazione {nuovo_nome_p} registrata!")
                         st.rerun()
 
-        st.markdown("#### Elenco Postazioni Attive")
-        st.dataframe(df_post, use_container_width=True)
+        st.markdown("#### Elenco Postazioni Attive (Ordinate per ID)")
+        st.dataframe(df_post.sort_values(by='id_postazione', ascending=True), use_container_width=True)
 
     # 6. PIANO ECONOMICO
     elif menu_admin == "💶 Piano Economico (Fatturato & Ore)":
