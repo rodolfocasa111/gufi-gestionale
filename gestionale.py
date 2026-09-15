@@ -769,7 +769,7 @@ if st.session_state["ruolo"] == "admin":
                             "cognome": nuovo_cognome.strip(),
                             "nome": nuovo_nome.strip(),
                             "email": nuova_email.strip(),
-                            "password": nueva_pwd.strip() if 'nueva_pwd' in locals() elsenuova_pwd.strip()
+                            "password": nuova_pwd.strip()
                         }).execute()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
@@ -785,7 +785,6 @@ if st.session_state["ruolo"] == "admin":
 
         with tab_mod_p:
             if not df_post.empty:
-                # Ordinamento per numero/ID postazione
                 df_post_sorted = df_post.sort_values(by='id_postazione', ascending=True)
                 map_mod_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post_sorted.iterrows()}
                 
