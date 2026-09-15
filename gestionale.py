@@ -644,7 +644,9 @@ if st.session_state["ruolo"] == "admin":
                     with st.form(f"form_add_turno_{id_pst}"):
                         c_t1, c_t2, c_t3 = st.columns(3)
                         with c_t1:
-                            id_nuovo_t = st.text_input("ID Turno", value=f"T0{len(df_turni)+1}", key=f"id_t_{id_pst}")
+                            # ID Turno generato automaticamente e univoco
+                            id_nuovo_t = f"T{len(df_turni) + 101:04d}"
+                            st.text_input("ID Turno (Generato Auto)", value=id_nuovo_t, disabled=True, key=f"id_t_{id_pst}")
                             data_nuovo_t = st.date_input("Data Servizio", value=data_italiana(), key=f"d_t_{id_pst}")
                         with c_t2:
                             scelte_g = [f"{r['cognome']} {r['nome']} ({r['id_guardia']})" for _, r in df_dip.iterrows()] if not df_dip.empty else ["Mirra Girolamo (G001)"]
@@ -656,7 +658,6 @@ if st.session_state["ruolo"] == "admin":
                         match_id = re.search(r'\((.*?)\)', guardia_sel)
                         g_codice = match_id.group(1) if match_id else guardia_sel.split()[0]
                         
-                        # Recupero sicuro del cognome pulito dall'anagrafica dipendenti
                         dip_trovato = df_dip[df_dip['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()]
                         cognome_selezionato = dip_trovato.iloc[0]['cognome'].strip() if not dip_trovato.empty else guardia_sel.split()[0]
 
