@@ -33,7 +33,7 @@ BUCKET_FOTO = "foto-turni"
 TIMEOUT_MINUTI = 15
 
 CREDENZIALI_ADMIN = {
-    "tiziana": {"password": "admin2026!", "nome": "Tiziana (Capo Reparto)"},
+    "tiziana": {"password": "admin2026!", "nome": "Tiziana (Direttore Generale Supremo \"MASTO\")"},
     "rino": {"password": "admin2026!", "nome": "Rino (Capo Reparto)"}
 }
 
@@ -778,7 +778,7 @@ if st.session_state["ruolo"] == "admin":
         st.markdown("#### Anagrafica Attiva")
         st.dataframe(df_dip[['id_guardia', 'cognome', 'nome', 'email', 'password']], use_container_width=True)
 
-    # 5. GESTIONE POSTAZIONI (CON ELIMINAZIONE POSTAZIONE & ORDINAMENTO NUMERICO)
+    # 5. GESTIONE POSTAZIONI
     elif menu_admin == "📍 Gestione Postazioni (Modifica/Aggiungi)":
         st.subheader("📍 Gestione Postazioni di Lavoro")
         tab_mod_p, tab_agg_p = st.tabs(["✏️ Modifica / Elimina Postazione Esistente", "➕ Aggiungi Nuova Postazione"])
