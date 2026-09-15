@@ -614,7 +614,6 @@ if st.session_state["ruolo"] == "admin":
                     if not turni_questa_post.empty:
                         st.write("**Turni programmati (Seleziona per eliminare):**")
                         
-                        # Tabella interattiva con caselle di spunta per la cancellazione
                         df_del_view = turni_questa_post[['id_turno', 'data', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo']].copy()
                         df_del_view.insert(0, "Seleziona", False)
                         
@@ -656,7 +655,10 @@ if st.session_state["ruolo"] == "admin":
 
                         match_id = re.search(r'\((.*?)\)', guardia_sel)
                         g_codice = match_id.group(1) if match_id else guardia_sel.split()[0]
-                        cognome_selezionato = guardia_sel.split()[0]
+                        
+                        # Recupero sicuro del cognome pulito dall'anagrafica dipendenti
+                        dip_trovato = df_dip[df_dip['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()]
+                        cognome_selezionato = dip_trovato.iloc[0]['cognome'].strip() if not dip_trovato.empty else guardia_sel.split()[0]
 
                         conflitti = df_turni[
                             ((df_turni['id_guardia'] == g_codice) | (df_turni['cognome_guardia'] == cognome_selezionato)) & 
@@ -675,20 +677,23 @@ if st.session_state["ruolo"] == "admin":
                                 st.error("Operazione bloccata: conferma la casella per il turno doppio.")
                             else:
                                 record = {
-                                    "id_turno": id_nuovo_t,
+                                    "id_turno": str(id_nuovo_t).strip(),
                                     "data": data_nuovo_t.strftime("%d/%m/%Y"),
-                                    "id_guardia": g_codice,
-                                    "cognome_guardia": cognome_selezionato,
-                                    "id_postazione": id_pst,
-                                    "ora_inizio_prevista": ora_ini,
-                                    "ora_fine_prevista": ora_fin,
-                                    "registrato_da": adm["nome"]
+                                    "id_guardia": str(g_codice).strip(),
+                                    "cognome_guardia": str(cognome_selezionato).strip(),
+                                    "id_postazione": str(id_pst).strip(),
+                                    "ora_inizio_prevista": str(ora_ini).strip(),
+                                    "ora_fine_prevista": str(ora_fin).strip(),
+                                    "registrato_da": str(adm["nome"]).strip()
                                 }
-                                supabase.table("turni").insert(record).execute()
-                                nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato}" + (" [FORZATO]" if not conflitti.empty else "")
-                                registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
-                                st.success("Turno salvato su Cloud!")
-                                st.rerun()
+                                try:
+                                    supabase.table("turni").insert(record).execute()
+                                    nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato}" + (" [FORZATO]" if not conflitti.empty else "")
+                                    registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
+                                    st.success("Turno salvato su Cloud con successo!")
+                                    st.rerun()
+                                except Exception as err_db:
+                                    st.error(f"Errore di scrittura su Supabase: {err_db}")
 
     # 3. RECAP GENERALE POSTAZIONI
     elif menu_admin == "📊 File Recap & Controllo Postazioni":
