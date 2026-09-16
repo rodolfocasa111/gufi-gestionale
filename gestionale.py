@@ -646,7 +646,8 @@ if st.session_state["ruolo"] == "admin":
                     with st.form(f"form_add_turno_{id_pst}"):
                         c_t1, c_t2, c_t3 = st.columns(3)
                         with c_t1:
-                            id_nuovo_t = f"T{len(df_turni) + 101:04d}"
+                            # ID Turno univoco basato sul timestamp in millisecondi per evitare qualsiasi duplicato
+                            id_nuovo_t = f"T{int(time.time() * 1000)}"
                             st.text_input("ID Turno (Generato Auto)", value=id_nuovo_t, disabled=True, key=f"id_t_{id_pst}")
                             data_nuovo_t = st.date_input("Data Servizio", value=data_italiana(), key=f"d_t_{id_pst}")
                         with c_t2:
@@ -831,7 +832,7 @@ if st.session_state["ruolo"] == "admin":
 
                 if st.form_submit_button("💾 Salva Nuova Postazione", type="primary"):
                     if not nuovo_nome_p.strip():
-                        st.error("Il nome del cliente è obbligatorio.")
+                        st.error("El nome del cliente è obbligatorio.")
                     else:
                         supabase.table("postazioni").insert({
                             "id_postazione": nuovo_id_p.strip(),
