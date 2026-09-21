@@ -456,7 +456,7 @@ if st.session_state["ruolo"] == "operatore":
                                         st.rerun()
 
                         with tab_extra:
-                            st.info("Carica ulteriori foto extra per这个 turno nella tua cartella.")
+                            st.info("Carica ulteriori foto extra per questo turno nella tua cartella.")
                             with st.form(f"form_extra_{id_t}"):
                                 foto_extra = st.file_uploader("Seleziona Foto Extra:", type=["jpg", "jpeg", "png"], key=f"fextra_{id_t}")
                                 desc_extra = st.text_input("Nota / Dettaglio foto (opzionale):", value="Controllo_Extra")
@@ -918,78 +918,86 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD (CON CANCELLAZIONE REALE DAL BUCKET STORAGE)
+    # 7. FOTO CLOUD (SUDDIVISE PER CARTELLA: OPERATORE ➔ DATA ➔ POSTAZIONE)
     elif menu_admin == "📁 Foto Postazioni Cloud":
-        st.subheader("📁 Tutte le Foto Archiviate su Supabase Storage")
-        st.caption("Esplorazione diretta del bucket: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
+        st.subheader("📁 Foto Archiviate su Supabase Storage (Visualizzazione a Cartelle)")
+        st.caption("Naviga tra le cartelle degli operatori, le date e le postazioni per visualizzare o eliminare le foto.")
 
         try:
-            def elenca_files_storage(path_cartella=""):
-                lista_oggetti = []
-                risultato = supabase.storage.from_(BUCKET_FOTO).list(path_cartella)
-                for item in risultato:
-                    nome_item = item.get("name")
-                    if "." not in nome_item and not item.get("id", None) and item.get("metadata") is None:
-                        nuovo_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
-                        lista_oggetti.extend(elenca_files_storage(nuovo_path))
-                    else:
-                        file_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
-                        url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(file_path)
-                        lista_oggetti.append({"path": file_path, "url": url_pubblico, "nome": nome_item})
-                return lista_oggetti
+            # 1. Elenca le cartelle degli operatori alla radice del bucket
+            root_items = supabase.storage.from_(BUCKET_FOTO).list()
+            operatori_cartelle = [item["name"] for item in root_items if "." not in item["name"]]
 
-            tutti_i_file = elenca_files_storage()
-
-            if tutti_i_file:
-                st.write("Spunta le foto che desideri eliminare definitivamente dal Cloud:")
+            if operatori_cartelle:
+                op_scelto = st.selectbox("👤 Seleziona Operatore:", sorted(operatori_cartelle))
                 
-                with st.form("form_elimina_foto"):
-                    paths_selezionati = []
-                    cols = st.columns(3)
-                    
-                    for idx_f, f_info in enumerate(tutti_i_file):
-                        with cols[idx_f % 3]:
-                            try:
-                                path_parti = f_info["path"].split("/")
-                                op_cartella = path_parti[0] if len(path_parti) > 0 else "N/D"
-                                data_cartella = path_parti[1] if len(path_parti) > 1 else "N/D"
-                                posto_cartella = path_parti[2] if len(path_parti) > 2 else "N/D"
-                                nome_file_meta = f_info["nome"].replace('.jpg', '').replace('_', ' ')
+                if op_scelto:
+                    # 2. Elenca le cartelle delle date per quell'operatore
+                    date_items = supabase.storage.from_(BUCKET_FOTO).list(op_scelto)
+                    date_cartelle = [item["name"] for item in date_items if "." not in item["name"]]
 
-                                cap_testo = (
-                                    f"👤 **Op:** `{op_cartella}`\n"
-                                    f"📅 **Data:** `{data_cartella}`\n"
-                                    f"📍 **Posto:** `{posto_cartella}`\n"
-                                    f"📄 `{nome_file_meta}`"
-                                )
+                    if date_cartelle:
+                        data_scelta = st.selectbox("📅 Seleziona Data:", sorted(date_cartelle, reverse=True))
 
-                                st.image(f_info["url"], caption=cap_testo, use_container_width=True)
-                                
-                                if st.checkbox(f"Seleziona foto", key=f"chk_f_{idx_f}"):
-                                    paths_selezionati.append(f_info["path"])
-                            except Exception:
-                                pass
+                        if data_scelta:
+                            # 3. Elenca le cartelle delle postazioni per quell'operatore e quella data
+                            path_pos = f"{op_scelto}/{data_scelta}"
+                            pos_items = supabase.storage.from_(BUCKET_FOTO).list(path_pos)
+                            pos_cartelle = [item["name"] for item in pos_items if "." not in item["name"]]
 
-                    st.markdown("---")
-                    btn_del_foto = st.form_submit_button("🗑️ Conferma ed Elimina Foto Selezionate", type="primary", use_container_width=True)
+                            if pos_cartelle:
+                                pos_scelta = st.selectbox("📍 Seleziona Postazione:", sorted(pos_cartelle))
 
-                    if btn_del_foto:
-                        if paths_selezionati:
-                            try:
-                                # Eliminazione diretta dal bucket Storage usando l'array di percorsi corretti
-                                supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
-                                registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal bucket Storage.")
-                                st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as e_del:
-                                st.error(f"Errore durante l'eliminazione delle foto: {e_del}")
-                        else:
-                            st.warning("Seleziona almeno una foto spuntando la casella corrispondente.")
+                                if pos_scelta:
+                                    # 4. Elenca i file immagine finali dentro la cartella della postazione
+                                    path_file_finali = f"{op_scelto}/{data_scelta}/{pos_scelta}"
+                                    file_items = supabase.storage.from_(BUCKET_FOTO).list(path_file_finali)
+                                    
+                                    immagini_trovate = [item for item in file_items if item.get("name") and "." in item.get("name")]
+
+                                    if immagini_trovate:
+                                        st.markdown(f"#### Immagini in: `{path_file_finali}`")
+                                        st.write("Spunta le foto che desideri eliminare definitivamente:")
+
+                                        with st.form("form_elimina_foto_gerarchico"):
+                                            paths_selezionati = []
+                                            cols = st.columns(3)
+
+                                            for idx_f, f_item in enumerate(immagini_trovate):
+                                                nome_f = f_item["name"]
+                                                f_path_rel = f"{path_file_finali}/{nome_f}"
+                                                url_pub = supabase.storage.from_(BUCKET_FOTO).get_public_url(f_path_rel)
+
+                                                with cols[idx_f % 3]:
+                                                    st.image(url_pub, caption=f"📄 {nome_f.replace('.jpg', '').replace('_', ' ')}", use_container_width=True)
+                                                    if st.checkbox(f"Seleziona foto", key=f"chk_ger_{idx_f}_{nome_f}"):
+                                                        paths_selezionati.append(f_path_rel)
+
+                                            st.markdown("---")
+                                            btn_del_ger = st.form_submit_button("🗑️ Elimina Foto Selezionate", type="primary", use_container_width=True)
+
+                                            if btn_del_ger:
+                                                if paths_selezionati:
+                                                    try:
+                                                        supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
+                                                        registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal percorso {path_file_finali}")
+                                                        st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
+                                                        time.sleep(1)
+                                                        st.rerun()
+                                                    except Exception as e_del:
+                                                        st.error(f"Errore durante l'eliminazione: {e_del}")
+                                                else:
+                                                    st.warning("Seleziona almeno una foto spuntando la casella.")
+                                    else:
+                                        st.info("Nessuna foto presente in questa cartella postazione.")
+                            else:
+                                st.info("Nessuna postazione trovata per questa data.")
+                    else:
+                        st.info("Nessuna data registrata per questo operatore.")
             else:
-                st.info("Nessuna foto trovata nel bucket Supabase Storage.")
+                st.info("Nessuna cartella operatore trovata nel bucket Supabase Storage.")
         except Exception as e_err:
-            st.error(f"Errore di lettura dal bucket Storage: {e_err}")
+            st.error(f"Errore di lettura dalle cartelle Storage: {e_err}")
 
     # 8. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
