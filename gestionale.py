@@ -918,10 +918,10 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD (LETTURA RICORSIVA DIRETTA DAL BUCKET SUPABASE STORAGE)
+    # 7. FOTO CLOUD (CON OPZIONE DI CANCELLAZIONE SELETTIVA DELLE FOTO DAL CLOUD)
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Tutte le Foto Archiviate su Supabase Storage")
-        st.caption("Esplorazione diretta e completa del bucket: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
+        st.caption("Esplorazione diretta del bucket: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
 
         try:
             def elenca_files_storage(path_cartella=""):
@@ -929,12 +929,10 @@ if st.session_state["ruolo"] == "admin":
                 risultato = supabase.storage.from_(BUCKET_FOTO).list(path_cartella)
                 for item in risultato:
                     nome_item = item.get("name")
-                    # Se non ha l'estensione (è una cartella), esplora dentro ricorsivamente
                     if "." not in nome_item and not item.get("id", None) and item.get("metadata") is None:
                         nuovo_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
                         lista_oggetti.extend(elenca_files_storage(nuovo_path))
                     else:
-                        # È un file immagine
                         file_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
                         url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(file_path)
                         lista_oggetti.append({"path": file_path, "url": url_pubblico, "nome": nome_item})
@@ -943,7 +941,15 @@ if st.session_state["ruolo"] == "admin":
             tutti_i_file = elenca_files_storage()
 
             if tutti_i_file:
+                st.write("Seleziona le foto da eliminare definitivamente dal Cloud:")
+                
+                # Inizializza stato sessione per le selezioni foto se non esiste
+                if "foto_da_eliminare" not in st.session_state:
+                    st.session_state["foto_da_eliminare"] = []
+
                 cols = st.columns(3)
+                paths_selezionati = []
+
                 for idx_f, f_info in enumerate(tutti_i_file):
                     with cols[idx_f % 3]:
                         try:
@@ -961,8 +967,25 @@ if st.session_state["ruolo"] == "admin":
                             )
 
                             st.image(f_info["url"], caption=cap_testo, use_container_width=True)
+                            
+                            # Checkbox di selezione per ogni foto
+                            if st.checkbox(f"Seleziona per eliminare", key=f"chk_foto_{idx_f}_{f_info['path']}"):
+                                paths_selezionati.append(f_info["path"])
                         except Exception:
                             pass
+
+                st.markdown("---")
+                if st.button("🗑️ Elimina Foto Selezionate dal Cloud", type="primary"):
+                    if paths_selezionati:
+                        try:
+                            supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
+                            registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal bucket Storage.")
+                            st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
+                            st.rerun()
+                        except Exception as e_del:
+                            st.error(f"Errore durante l'eliminazione delle foto: {e_del}")
+                    else:
+                        st.warning("Seleziona almeno una foto spuntando la relativa casella.")
             else:
                 st.info("Nessuna foto trovata nel bucket Supabase Storage.")
         except Exception as e_err:
