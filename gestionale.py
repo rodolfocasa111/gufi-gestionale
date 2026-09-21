@@ -456,7 +456,7 @@ if st.session_state["ruolo"] == "operatore":
                                         st.rerun()
 
                         with tab_extra:
-                            st.info("Carica ulteriori foto extra per questo turno nella tua cartella.")
+                            st.info("Carica ulteriori foto extra per这个 turno nella tua cartella.")
                             with st.form(f"form_extra_{id_t}"):
                                 foto_extra = st.file_uploader("Seleziona Foto Extra:", type=["jpg", "jpeg", "png"], key=f"fextra_{id_t}")
                                 desc_extra = st.text_input("Nota / Dettaglio foto (opzionale):", value="Controllo_Extra")
@@ -918,7 +918,7 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD (CON OPZIONE DI CANCELLAZIONE SELETTIVA DELLE FOTO DAL CLOUD)
+    # 7. FOTO CLOUD (CON CANCELLAZIONE REALE DAL BUCKET STORAGE)
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Tutte le Foto Archiviate su Supabase Storage")
         st.caption("Esplorazione diretta del bucket: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
@@ -941,51 +941,51 @@ if st.session_state["ruolo"] == "admin":
             tutti_i_file = elenca_files_storage()
 
             if tutti_i_file:
-                st.write("Seleziona le foto da eliminare definitivamente dal Cloud:")
+                st.write("Spunta le foto che desideri eliminare definitivamente dal Cloud:")
                 
-                # Inizializza stato sessione per le selezioni foto se non esiste
-                if "foto_da_eliminare" not in st.session_state:
-                    st.session_state["foto_da_eliminare"] = []
+                with st.form("form_elimina_foto"):
+                    paths_selezionati = []
+                    cols = st.columns(3)
+                    
+                    for idx_f, f_info in enumerate(tutti_i_file):
+                        with cols[idx_f % 3]:
+                            try:
+                                path_parti = f_info["path"].split("/")
+                                op_cartella = path_parti[0] if len(path_parti) > 0 else "N/D"
+                                data_cartella = path_parti[1] if len(path_parti) > 1 else "N/D"
+                                posto_cartella = path_parti[2] if len(path_parti) > 2 else "N/D"
+                                nome_file_meta = f_info["nome"].replace('.jpg', '').replace('_', ' ')
 
-                cols = st.columns(3)
-                paths_selezionati = []
+                                cap_testo = (
+                                    f"👤 **Op:** `{op_cartella}`\n"
+                                    f"📅 **Data:** `{data_cartella}`\n"
+                                    f"📍 **Posto:** `{posto_cartella}`\n"
+                                    f"📄 `{nome_file_meta}`"
+                                )
 
-                for idx_f, f_info in enumerate(tutti_i_file):
-                    with cols[idx_f % 3]:
-                        try:
-                            path_parti = f_info["path"].split("/")
-                            op_cartella = path_parti[0] if len(path_parti) > 0 else "N/D"
-                            data_cartella = path_parti[1] if len(path_parti) > 1 else "N/D"
-                            posto_cartella = path_parti[2] if len(path_parti) > 2 else "N/D"
-                            nome_file_meta = f_info["nome"].replace('.jpg', '').replace('_', ' ')
+                                st.image(f_info["url"], caption=cap_testo, use_container_width=True)
+                                
+                                if st.checkbox(f"Seleziona foto", key=f"chk_f_{idx_f}"):
+                                    paths_selezionati.append(f_info["path"])
+                            except Exception:
+                                pass
 
-                            cap_testo = (
-                                f"👤 **Op:** `{op_cartella}`\n"
-                                f"📅 **Data:** `{data_cartella}`\n"
-                                f"📍 **Posto:** `{posto_cartella}`\n"
-                                f"📄 `{nome_file_meta}`"
-                            )
+                    st.markdown("---")
+                    btn_del_foto = st.form_submit_button("🗑️ Conferma ed Elimina Foto Selezionate", type="primary", use_container_width=True)
 
-                            st.image(f_info["url"], caption=cap_testo, use_container_width=True)
-                            
-                            # Checkbox di selezione per ogni foto
-                            if st.checkbox(f"Seleziona per eliminare", key=f"chk_foto_{idx_f}_{f_info['path']}"):
-                                paths_selezionati.append(f_info["path"])
-                        except Exception:
-                            pass
-
-                st.markdown("---")
-                if st.button("🗑️ Elimina Foto Selezionate dal Cloud", type="primary"):
-                    if paths_selezionati:
-                        try:
-                            supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
-                            registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal bucket Storage.")
-                            st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
-                            st.rerun()
-                        except Exception as e_del:
-                            st.error(f"Errore durante l'eliminazione delle foto: {e_del}")
-                    else:
-                        st.warning("Seleziona almeno una foto spuntando la relativa casella.")
+                    if btn_del_foto:
+                        if paths_selezionati:
+                            try:
+                                # Eliminazione diretta dal bucket Storage usando l'array di percorsi corretti
+                                supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
+                                registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal bucket Storage.")
+                                st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e_del:
+                                st.error(f"Errore durante l'eliminazione delle foto: {e_del}")
+                        else:
+                            st.warning("Seleziona almeno una foto spuntando la casella corrispondente.")
             else:
                 st.info("Nessuna foto trovata nel bucket Supabase Storage.")
         except Exception as e_err:
