@@ -646,7 +646,6 @@ if st.session_state["ruolo"] == "admin":
                     with st.form(f"form_add_turno_{id_pst}"):
                         c_t1, c_t2, c_t3 = st.columns(3)
                         with c_t1:
-                            # ID Turno univoco basato sul timestamp in millisecondi per evitare qualsiasi duplicato
                             id_nuovo_t = f"T{int(time.time() * 1000)}"
                             st.text_input("ID Turno (Generato Auto)", value=id_nuovo_t, disabled=True, key=f"id_t_{id_pst}")
                             data_nuovo_t = st.date_input("Data Servizio", value=data_italiana(), key=f"d_t_{id_pst}")
@@ -832,7 +831,7 @@ if st.session_state["ruolo"] == "admin":
 
                 if st.form_submit_button("💾 Salva Nuova Postazione", type="primary"):
                     if not nuovo_nome_p.strip():
-                        st.error("El nome del cliente è obbligatorio.")
+                        st.error("Il nome del cliente è obbligatorio.")
                     else:
                         supabase.table("postazioni").insert({
                             "id_postazione": nuovo_id_p.strip(),
@@ -919,46 +918,55 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD
+    # 7. FOTO CLOUD (LETTURA RICORSIVA DIRETTA DAL BUCKET SUPABASE STORAGE)
     elif menu_admin == "📁 Foto Postazioni Cloud":
-        st.subheader("📁 Foto Archiviate su Supabase Storage")
-        st.caption("Struttura cartelle sul cloud: Operatore ➔ Data ➔ Nome Posizione ➔ Foto con Dettagli")
-        
-        foto_turni = df_turni[
-            (df_turni['foto_postazione'].notna()) & 
-            (df_turni['foto_postazione'].astype(str).str.startswith(('http://', 'https://')))
-        ]
-        if not foto_turni.empty:
-            cols = st.columns(3)
-            for idx_f, (_, r_f) in enumerate(foto_turni.iterrows()):
-                with cols[idx_f % 3]:
-                    try:
-                        url_foto = str(r_f['foto_postazione'])
-                        info_dettaglio = ""
-                        if "Ore_" in url_foto:
-                            parti_url = url_foto.split("/")
-                            nome_f_cloud = parti_url[-1] if parti_url else ""
-                            info_dettaglio = f"\n📄 {nome_f_cloud.replace('.jpg', '').replace('_', ' ')}"
+        st.subheader("📁 Tutte le Foto Archiviate su Supabase Storage")
+        st.caption("Esplorazione diretta e completa del bucket: Operatore ➔ Data ➔ Posizione ➔ Foto con Dettagli")
 
-                        p_inf = df_post[df_post['id_postazione'] == r_f['id_postazione']]
-                        nome_p_reale = p_inf.iloc[0]['nome_cliente'] if not p_inf.empty else r_f['id_postazione']
+        try:
+            def elenca_files_storage(path_cartella=""):
+                lista_oggetti = []
+                risultato = supabase.storage.from_(BUCKET_FOTO).list(path_cartella)
+                for item in risultato:
+                    nome_item = item.get("name")
+                    # Se non ha l'estensione (è una cartella), esplora dentro ricorsivamente
+                    if "." not in nome_item and not item.get("id", None) and item.get("metadata") is None:
+                        nuovo_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
+                        lista_oggetti.extend(elenca_files_storage(nuovo_path))
+                    else:
+                        # È un file immagine
+                        file_path = f"{path_cartella}/{nome_item}" if path_cartella else nome_item
+                        url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(file_path)
+                        lista_oggetti.append({"path": file_path, "url": url_pubblico, "nome": nome_item})
+                return lista_oggetti
 
-                        cap_testo = (
-                            f"👤 **{r_f['cognome_guardia']}** | 📍 **{nome_p_reale}**\n"
-                            f"📅 **Data:** {r_f['data']}\n"
-                            f"🟢 **Check-in:** {r_f.get('check_in_effettivo', 'N/D')}"
-                            f"{info_dettaglio}"
-                        )
+            tutti_i_file = elenca_files_storage()
 
-                        st.image(
-                            r_f['foto_postazione'], 
-                            caption=cap_testo, 
-                            use_container_width=True
-                        )
-                    except Exception:
-                        st.warning(f"Impossibile visualizzare l'immagine del turno {r_f.get('id_turno')}")
-        else:
-            st.info("Nessuna nuova foto registrata su Supabase Storage con link cloud valido.")
+            if tutti_i_file:
+                cols = st.columns(3)
+                for idx_f, f_info in enumerate(tutti_i_file):
+                    with cols[idx_f % 3]:
+                        try:
+                            path_parti = f_info["path"].split("/")
+                            op_cartella = path_parti[0] if len(path_parti) > 0 else "N/D"
+                            data_cartella = path_parti[1] if len(path_parti) > 1 else "N/D"
+                            posto_cartella = path_parti[2] if len(path_parti) > 2 else "N/D"
+                            nome_file_meta = f_info["nome"].replace('.jpg', '').replace('_', ' ')
+
+                            cap_testo = (
+                                f"👤 **Op:** `{op_cartella}`\n"
+                                f"📅 **Data:** `{data_cartella}`\n"
+                                f"📍 **Posto:** `{posto_cartella}`\n"
+                                f"📄 `{nome_file_meta}`"
+                            )
+
+                            st.image(f_info["url"], caption=cap_testo, use_container_width=True)
+                        except Exception:
+                            pass
+            else:
+                st.info("Nessuna foto trovata nel bucket Supabase Storage.")
+        except Exception as e_err:
+            st.error(f"Errore di lettura dal bucket Storage: {e_err}")
 
     # 8. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
