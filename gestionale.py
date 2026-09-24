@@ -96,7 +96,7 @@ def carica_dati():
 
 df_turni, df_dip, df_post = carica_dati()
 
-# --- MAPPATURA AUTOMATICA COGNOMI ---
+# --- MAPPATURA AUTOMATICA COGNOMI & POSTAZIONI ---
 mappa_id_cognome = {}
 if not df_dip.empty:
     for _, r_d in df_dip.iterrows():
@@ -125,10 +125,21 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
-# --- SALVATAGGIO FOTO CON STRUTTURA REALE ---
+mappa_id_postazione = {}
+if not df_post.empty:
+    for _, r_p in df_post.iterrows():
+        id_pst_chiave = str(r_p['id_postazione']).strip()
+        mappa_id_postazione[id_pst_chiave] = str(r_p.get('nome_cliente', id_pst_chiave)).strip()
+
+# --- SALVATAGGIO FOTO SU STORAGE (CON DATA DINAMICA CHECK-IN / CHECK-OUT) ---
 def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
-    giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
+    
+    if tipo_timbratura == "OUT":
+        giorno_str = data_italiana().strftime("%Y-%m-%d")
+    else:
+        giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
+        
     cartella_data = giorno_str
     cartella_posizione = pulisci_nome(nome_postazione)
     
@@ -203,26 +214,50 @@ def calcola_ore(ora_inizio, ora_fine):
     try:
         if pd.isna(ora_inizio) or pd.isna(ora_fine):
             return 0.0
-        str_i = str(ora_inizio).strip().split()[-1]
-        str_f = str(ora_fine).strip().split()[-1]
+            
+        str_i = str(ora_inizio).strip()
+        str_f = str(ora_fine).strip()
+        
+        dt_ini, dt_fin = None, None
+        for fmt in ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+            try:
+                dt_ini = datetime.strptime(str_i, fmt)
+                break
+            except Exception:
+                pass
+        for fmt in ["%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]:
+            try:
+                dt_fin = datetime.strptime(str_f, fmt)
+                break
+            except Exception:
+                pass
+                
+        if dt_ini and dt_fin:
+            diff = (dt_fin - dt_ini).total_seconds() / 3600.0
+            return round(diff, 2)
+
+        ora_i_solo = str_i.split()[-1]
+        ora_f_solo = str_f.split()[-1]
         t_ini, t_fin = None, None
         for fmt in ["%H:%M:%S", "%H:%M"]:
             try:
-                t_ini = datetime.strptime(str_i, fmt)
+                t_ini = datetime.strptime(ora_i_solo, fmt)
                 break
             except Exception:
                 pass
         for fmt in ["%H:%M:%S", "%H:%M"]:
             try:
-                t_fin = datetime.strptime(str_f, fmt)
+                t_fin = datetime.strptime(ora_f_solo, fmt)
                 break
             except Exception:
                 pass
+                
         if t_ini and t_fin:
             diff = (t_fin - t_ini).total_seconds() / 3600.0
             if diff < 0:
                 diff += 24.0
             return round(diff, 2)
+            
         return 0.0
     except Exception:
         return 0.0
@@ -447,7 +482,7 @@ if st.session_state["ruolo"] == "operatore":
                                             "registrato_da": f"{op['nome']} (Check-out)"
                                         }
                                         if foto_out:
-                                            foto_url = salva_foto_su_storage(foto_out, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, "OUT")
+                                            foto_url = salva_foto_su_storage(foto_out, data_italiana(), nome_posto, op['id'], op['nome'], id_t, "OUT")
                                             update_data["foto_postazione"] = foto_url
 
                                         supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
@@ -463,7 +498,7 @@ if st.session_state["ruolo"] == "operatore":
                                 
                                 if st.form_submit_button("📤 Carica Foto Extra su Cloud", type="primary", use_container_width=True):
                                     if foto_extra:
-                                        salva_foto_su_storage(foto_extra, data_oggettiva, nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA")
+                                        salva_foto_su_storage(foto_extra, data_italiana(), nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA")
                                         registra_log(op["nome"], "CARICAMENTO_FOTO_EXTRA", f"Turno {id_t} - {nome_posto}")
                                         st.success("✅ Foto extra caricata correttamente!")
                                     else:
@@ -546,6 +581,7 @@ if st.session_state["ruolo"] == "admin":
         "Seleziona Sezione:",
         [
             "🏢 Vista Postazione (Controllo Settimanale)",
+            "👤 Vista Dipendente (Controllo Settimanale)",
             "📅 Gestione Turni per Postazione",
             "📊 File Recap & Controllo Postazioni",
             "👥 Gestione Dipendenti (Modifica/Aggiungi)",
@@ -567,7 +603,7 @@ if st.session_state["ruolo"] == "admin":
             id_p_selezionato = map_p[scelta_p_str] if scelta_p_str else None
 
         with c_sel_d:
-            data_riferimento = st.date_input("Settimana contenente il giorno:", value=data_italiana())
+            data_riferimento = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_sett_post")
 
         if id_p_selezionato:
             inizio_sett = data_riferimento - timedelta(days=data_riferimento.weekday())
@@ -601,6 +637,79 @@ if st.session_state["ruolo"] == "admin":
                         "Entrata (Check-in)": "-", "Uscita (Check-out)": "-", "Registrato Da": "-"
                     })
             st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
+
+    # 1.B NUOVA: VISTA DIPENDENTE SETTIMANALE
+    elif menu_admin == "👤 Vista Dipendente (Controllo Settimanale)":
+        st.subheader("👤 Programma Settimanale per Singolo Dipendente")
+        c_sel_dip, c_sel_dd = st.columns([2.5, 1.5])
+        
+        with c_sel_dip:
+            if not df_dip.empty:
+                opzioni_dip = {
+                    f"{r['cognome']} {r['nome']} ({r['id_guardia']})": {
+                        "id": str(r['id_guardia']).strip(),
+                        "cognome": str(r['cognome']).strip(),
+                        "nome_completo": f"{r.get('cognome', '')} {r.get('nome', '')}".strip()
+                    }
+                    for _, r in df_dip.sort_values(by='cognome').iterrows()
+                }
+                scelta_dip_str = st.selectbox("Seleziona Dipendente da monitorare:", list(opzioni_dip.keys()))
+                dip_selezionato = opzioni_dip[scelta_dip_str]
+            else:
+                dip_selezionato = None
+                st.warning("Nessun dipendente registrato.")
+
+        with c_sel_dd:
+            data_riferimento_dip = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_sett_dip")
+
+        if dip_selezionato:
+            inizio_sett = data_riferimento_dip - timedelta(days=data_riferimento_dip.weekday())
+            fine_sett = inizio_sett + timedelta(days=6)
+            st.markdown(f"#### Turni di **{dip_selezionato['nome_completo']}** dal `{inizio_sett.strftime('%d/%m/%Y')}` al `{fine_sett.strftime('%d/%m/%Y')}`")
+
+            # Filtra i turni del dipendente (per id o per cognome)
+            id_g_sel = dip_selezionato["id"].lower()
+            cogn_g_sel = dip_selezionato["cognome"].lower()
+            
+            turni_dip = df_turni[
+                (df_turni['id_guardia'].astype(str).str.strip().str.lower() == id_g_sel) |
+                (df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == cogn_g_sel)
+            ].copy()
+
+            giorni_nomi = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+            righe_sett_dip = []
+
+            for i in range(7):
+                g_curr = inizio_sett + timedelta(days=i)
+                tg = turni_dip[turni_dip['data_dt'] == g_curr]
+                if not tg.empty:
+                    for _, t in tg.iterrows():
+                        cin = t.get('check_in_effettivo', '')
+                        cout = t.get('check_out_effettivo', '')
+                        id_p_t = str(t.get('id_postazione', '')).strip()
+                        nome_postazione = mappa_id_postazione.get(id_p_t, id_p_t)
+                        
+                        righe_sett_dip.append({
+                            "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
+                            "Postazione": f"📍 {nome_postazione}",
+                            "Turno ID": t.get('id_turno', ''),
+                            "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
+                            "Entrata (Check-in)": cin if pd.notna(cin) and str(cin).strip() else "⏳ Non timbrato",
+                            "Uscita (Check-out)": cout if pd.notna(cout) and str(cout).strip() else "⏳ Non timbrato",
+                            "Registrato Da": t.get('registrato_da', 'Sistema')
+                        })
+                else:
+                    righe_sett_dip.append({
+                        "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
+                        "Postazione": "🏖️ RIPOSO",
+                        "Turno ID": "-",
+                        "Orario": "-",
+                        "Entrata (Check-in)": "-",
+                        "Uscita (Check-out)": "-",
+                        "Registrato Da": "-"
+                    })
+                    
+            st.dataframe(pd.DataFrame(righe_sett_dip), use_container_width=True)
 
     # 2. GESTIONE TURNI PER POSTAZIONE
     elif menu_admin == "📅 Gestione Turni per Postazione":
@@ -918,13 +1027,12 @@ if st.session_state["ruolo"] == "admin":
                 else:
                     st.info(f"Nessun turno registrato per questa postazione nel mese {mese_filtro}.")
 
-    # 7. FOTO CLOUD (SUDDIVISE PER CARTELLA: OPERATORE ➔ DATA ➔ POSTAZIONE)
+    # 7. FOTO CLOUD
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage (Visualizzazione a Cartelle)")
         st.caption("Naviga tra le cartelle degli operatori, le date e le postazioni per visualizzare o eliminare le foto.")
 
         try:
-            # 1. Elenca le cartelle degli operatori alla radice del bucket
             root_items = supabase.storage.from_(BUCKET_FOTO).list()
             operatori_cartelle = [item["name"] for item in root_items if "." not in item["name"]]
 
@@ -932,7 +1040,6 @@ if st.session_state["ruolo"] == "admin":
                 op_scelto = st.selectbox("👤 Seleziona Operatore:", sorted(operatori_cartelle))
                 
                 if op_scelto:
-                    # 2. Elenca le cartelle delle date per quell'operatore
                     date_items = supabase.storage.from_(BUCKET_FOTO).list(op_scelto)
                     date_cartelle = [item["name"] for item in date_items if "." not in item["name"]]
 
@@ -940,7 +1047,6 @@ if st.session_state["ruolo"] == "admin":
                         data_scelta = st.selectbox("📅 Seleziona Data:", sorted(date_cartelle, reverse=True))
 
                         if data_scelta:
-                            # 3. Elenca le cartelle delle postazioni per quell'operatore e quella data
                             path_pos = f"{op_scelto}/{data_scelta}"
                             pos_items = supabase.storage.from_(BUCKET_FOTO).list(path_pos)
                             pos_cartelle = [item["name"] for item in pos_items if "." not in item["name"]]
@@ -949,7 +1055,6 @@ if st.session_state["ruolo"] == "admin":
                                 pos_scelta = st.selectbox("📍 Seleziona Postazione:", sorted(pos_cartelle))
 
                                 if pos_scelta:
-                                    # 4. Elenca i file immagine finali dentro la cartella della postazione
                                     path_file_finali = f"{op_scelto}/{data_scelta}/{pos_scelta}"
                                     file_items = supabase.storage.from_(BUCKET_FOTO).list(path_file_finali)
                                     
