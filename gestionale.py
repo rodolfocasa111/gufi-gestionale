@@ -19,7 +19,7 @@ def ora_italiana():
 def data_italiana():
     return ora_italiana().date()
 
-# --- CONNESSIONE SUPABASE (CON PULIZIA CACHE FORZATA) ---
+# --- CONNESSIONE SUPABASE ---
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -32,10 +32,21 @@ BUCKET_FOTO = "foto-turni"
 # --- CONFIGURAZIONI & SICUREZZA ---
 TIMEOUT_MINUTI = 15
 
+# Le password possono essere messe in st.secrets (ADMIN_PWD_TIZIANA, ADMIN_PWD_RINO).
+# Se non presenti nei secrets, viene usato il valore di riserva qui sotto.
 CREDENZIALI_ADMIN = {
-    "tiziana": {"password": "admin2026!", "nome": "Tiziana (Direttore Generale Supremo \"MASTO\")"},
-    "rino": {"password": "admin2026!", "nome": "Rino (Capo Reparto)"}
+    "tiziana": {
+        "password": st.secrets.get("ADMIN_PWD_TIZIANA", "admin2026!"),
+        "nome": "Tiziana (Direttore Generale Supremo \"MASTO\")"
+    },
+    "rino": {
+        "password": st.secrets.get("ADMIN_PWD_RINO", "admin2026!"),
+        "nome": "Rino (Capo Reparto)"
+    }
 }
+
+GIORNI_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+GIORNI_BREVI = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
 
 # Controllo Inattività Sessione (15 minuti)
 ora_attuale_ts = time.time()
@@ -75,7 +86,7 @@ def analizza_data_completa(val):
     s = str(val).strip().lower()
     for g in ['lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica']:
         s = s.replace(g, '').strip()
-    
+
     mesi = {
         'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
         'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
@@ -85,10 +96,10 @@ def analizza_data_completa(val):
         if m_it in s:
             s = s.replace(m_it, m_num)
             break
-            
+
     s = s.replace("-", "/").replace(".", "/")
     parti = s.split()
-    
+
     if len(parti) >= 3 and parti[0].isdigit() and parti[1].isdigit() and parti[2].isdigit():
         s_data = f"{int(parti[0]):02d}/{int(parti[1]):02d}/{parti[2]}"
     else:
@@ -107,22 +118,35 @@ def analizza_data_completa(val):
         pass
     return None
 
+# --- LETTURA A PAGINE (supera il limite di 1000 righe di Supabase) ---
+def leggi_tutto(tabella, ordine=None, pagina=1000):
+    tutte = []
+    inizio = 0
+    while True:
+        query = supabase.table(tabella).select("*")
+        if ordine:
+            query = query.order(ordine)
+        res = query.range(inizio, inizio + pagina - 1).execute()
+        blocco = res.data or []
+        tutte.extend(blocco)
+        if len(blocco) < pagina:
+            break
+        inizio += pagina
+    return tutte
+
 # --- CARICAMENTO DATI DA SUPABASE ---
 def carica_dati():
-    res_dip = supabase.table("dipendenti").select("*").limit(2000).execute()
-    df_dip = pd.DataFrame(res_dip.data)
+    df_dip = pd.DataFrame(leggi_tutto("dipendenti", ordine="id_guardia"))
     if df_dip.empty:
         df_dip = pd.DataFrame(columns=['id_guardia', 'cognome', 'nome', 'email', 'password'])
 
-    res_post = supabase.table("postazioni").select("*").limit(2000).execute()
-    df_post = pd.DataFrame(res_post.data)
+    df_post = pd.DataFrame(leggi_tutto("postazioni", ordine="id_postazione"))
     if not df_post.empty and 'id_postazione' in df_post.columns:
         df_post = df_post.sort_values(by='id_postazione', ascending=True)
     else:
         df_post = pd.DataFrame(columns=['id_postazione', 'nome_cliente', 'indirizzo_sede'])
 
-    res_turni = supabase.table("turni").select("*").limit(10000).execute()
-    df_turni = pd.DataFrame(res_turni.data)
+    df_turni = pd.DataFrame(leggi_tutto("turni", ordine="id_turno"))
     if df_turni.empty:
         df_turni = pd.DataFrame(columns=[
             'id_turno', 'data', 'id_guardia', 'cognome_guardia', 'id_postazione',
@@ -131,6 +155,7 @@ def carica_dati():
             'foto_postazione', 'registrato_da'
         ])
 
+    # Aggiungi colonna data_dt standardizzata
     if not df_turni.empty and 'data' in df_turni.columns:
         df_turni['data_dt'] = df_turni['data'].apply(analizza_data_completa)
         df_turni['Mese_Anno'] = df_turni['data_dt'].apply(lambda d: d.strftime("%m/%Y") if pd.notna(d) else "Non Riconosciuto")
@@ -151,10 +176,20 @@ if not df_dip.empty:
         if id_g:
             mappa_id_cognome[id_g] = cogn
 
+# --- MAPPATURA POSTAZIONI ---
+mappa_id_postazione = {}
+if not df_post.empty:
+    for _, r_p in df_post.iterrows():
+        mappa_id_postazione[str(r_p['id_postazione']).strip()] = str(r_p.get('nome_cliente', '')).strip()
+
+def nome_postazione_da_id(id_p):
+    id_p = str(id_p).strip()
+    return mappa_id_postazione.get(id_p, id_p if id_p else "N/D")
+
 def risolvi_cognome_effettivo(r):
     val_cogn = str(r.get('cognome_guardia', '')).strip()
     val_id = str(r.get('id_guardia', '')).strip().lower()
-    
+
     if val_cogn.lower() in mappa_id_cognome:
         return mappa_id_cognome[val_cogn.lower()]
     if val_id in mappa_id_cognome:
@@ -165,7 +200,7 @@ def risolvi_cognome_effettivo(r):
         if possibile_id in mappa_id_cognome:
             return mappa_id_cognome[possibile_id]
         return parti[-1].strip()
-        
+
     return val_cogn if val_cogn else "N/D"
 
 if not df_turni.empty:
@@ -177,14 +212,14 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
     cartella_data = giorno_str
     cartella_posizione = pulisci_nome(nome_postazione)
-    
+
     data_ora_scatto = ora_italiana()
     orario_str = data_ora_scatto.strftime('%H-%M-%S')
     gps_info = "41.229565_14.508582"
-    
+
     nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.jpg"
     path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
-    
+
     file_bytes = file_foto.getvalue()
     try:
         supabase.storage.from_(BUCKET_FOTO).upload(
@@ -202,7 +237,7 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
         except Exception as e_up:
             st.error(f"Errore caricamento su Supabase Storage: {e_up}")
             raise e_up
-            
+
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
@@ -234,6 +269,99 @@ def calcola_ore(ora_inizio, ora_fine):
     except Exception:
         return 0.0
 
+def timbrato(valore):
+    return pd.notna(valore) and str(valore).strip() != '' and str(valore).strip() != 'None'
+
+def estrai_ore_t(r):
+    cin, cout = r.get('check_in_effettivo'), r.get('check_out_effettivo')
+    if timbrato(cin) and timbrato(cout):
+        return calcola_ore(cin, cout)
+    return calcola_ore(r.get('ora_inizio_prevista', '00:00'), r.get('ora_fine_prevista', '00:00'))
+
+# --- FUNZIONI VISTA SETTIMANALE DIPENDENTE ---
+def turni_del_dipendente(id_guardia, cognome):
+    if df_turni.empty:
+        return df_turni.iloc[0:0].copy()
+    maschera = (
+        (df_turni['id_guardia'].astype(str).str.strip().str.lower() == str(id_guardia).strip().lower()) |
+        (df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == str(cognome).strip().lower())
+    )
+    return df_turni[maschera].copy()
+
+def render_settimana_dipendente(turni_dip, data_rif, etichetta):
+    inizio = data_rif - timedelta(days=data_rif.weekday())
+    fine = inizio + timedelta(days=6)
+    st.markdown(f"#### {etichetta} — Settimana dal `{inizio.strftime('%d/%m/%Y')}` al `{fine.strftime('%d/%m/%Y')}`")
+
+    if turni_dip.empty:
+        settimana = turni_dip
+    else:
+        maschera = turni_dip['data_dt'].apply(
+            lambda d: d is not None and pd.notna(d) and inizio <= d <= fine
+        ).astype(bool)
+        settimana = turni_dip[maschera].copy()
+
+    if settimana.empty:
+        st.info("Nessun turno assegnato in questa settimana.")
+        return
+
+    settimana['Ore_Turno'] = settimana.apply(estrai_ore_t, axis=1)
+    settimana['Nome_Postazione'] = settimana['id_postazione'].apply(nome_postazione_da_id)
+
+    # Metriche riepilogo
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Turni nella settimana", len(settimana))
+    m2.metric("Ore complessive", round(settimana['Ore_Turno'].sum(), 2))
+    m3.metric("Postazioni diverse", settimana['Nome_Postazione'].nunique())
+
+    # Matrice Postazione x Giorno
+    st.markdown("##### 🗺️ Riepilogo: postazioni per giorno")
+    colonne_giorni = []
+    for i in range(7):
+        g = inizio + timedelta(days=i)
+        colonne_giorni.append((g, f"{GIORNI_BREVI[i]} {g.strftime('%d/%m')}"))
+
+    postazioni_sett = sorted(settimana['Nome_Postazione'].unique())
+    righe_matrice = []
+    for nome_p in postazioni_sett:
+        riga = {"Postazione": nome_p}
+        for g, etichetta_g in colonne_giorni:
+            t_gp = settimana[(settimana['data_dt'] == g) & (settimana['Nome_Postazione'] == nome_p)]
+            if t_gp.empty:
+                riga[etichetta_g] = "—"
+            else:
+                orari = [f"{t.get('ora_inizio_prevista', '-')}-{t.get('ora_fine_prevista', '-')}" for _, t in t_gp.sort_values(by='ora_inizio_prevista').iterrows()]
+                riga[etichetta_g] = " / ".join(orari)
+        righe_matrice.append(riga)
+    st.dataframe(pd.DataFrame(righe_matrice), use_container_width=True, hide_index=True)
+
+    # Dettaglio giorno per giorno
+    st.markdown("##### 📋 Dettaglio giorno per giorno")
+    righe_dett = []
+    for i in range(7):
+        g = inizio + timedelta(days=i)
+        etichetta_g = f"{GIORNI_IT[i]} ({g.strftime('%d/%m')})"
+        tg = settimana[settimana['data_dt'] == g]
+        if tg.empty:
+            righe_dett.append({
+                "Giorno": etichetta_g, "Turno ID": "-", "Postazione": "🏠 RIPOSO / NESSUN TURNO",
+                "Orario": "-", "Ore": "-", "Entrata (Check-in)": "-", "Uscita (Check-out)": "-"
+            })
+        else:
+            for _, t in tg.sort_values(by='ora_inizio_prevista').iterrows():
+                cin = t.get('check_in_effettivo', '')
+                cout = t.get('check_out_effettivo', '')
+                righe_dett.append({
+                    "Giorno": etichetta_g,
+                    "Turno ID": t.get('id_turno', ''),
+                    "Postazione": t['Nome_Postazione'],
+                    "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
+                    "Ore": t['Ore_Turno'],
+                    "Entrata (Check-in)": cin if timbrato(cin) else "⏳ Non timbrato",
+                    "Uscita (Check-out)": cout if timbrato(cout) else "⏳ Non timbrato"
+                })
+    st.dataframe(pd.DataFrame(righe_dett), use_container_width=True, hide_index=True)
+
 # -------------------------------------------------------------------------------------------------
 # LOGIN
 # -------------------------------------------------------------------------------------------------
@@ -256,7 +384,7 @@ if not st.session_state["autenticato"]:
                     val_cognome = cognome_input.strip().lower()
                     val_pwd = pwd_input.strip()
                     trovato = df_dip[df_dip['cognome'].astype(str).str.strip().str.lower() == val_cognome]
-                    
+
                     if not trovato.empty:
                         record_dip = trovato.iloc[0]
                         pwd_registrata = str(record_dip.get('password', 'gufi2026!')).strip()
@@ -310,57 +438,51 @@ if st.session_state["ruolo"] == "operatore":
             st.rerun()
 
     st.markdown("---")
-    tab_attivi, tab_storico, tab_foto_op = st.tabs([
-        "🟢 Turni da Svolgere / Oggi", 
-        "📜 Storico Turni Passati", 
+    tab_attivi, tab_settimana_op, tab_storico, tab_foto_op = st.tabs([
+        "🟢 Turni da Svolgere / Oggi",
+        "📆 La Mia Settimana",
+        "📜 Storico Turni Passati",
         "📸 Le Mie Foto Caricate"
     ])
 
-    turni_miei = df_turni[
-        (df_turni['id_guardia'].astype(str).str.lower() == op['id'].lower()) | 
-        (df_turni['cognome_guardia'].astype(str).str.lower() == op['cognome'].lower())
-    ].copy()
+    turni_miei = turni_del_dipendente(op['id'], op['cognome'])
 
     oggi = data_italiana()
     limite_aperti_recenti = oggi - timedelta(days=1)
 
     def turno_completato(r):
-        cin = str(r.get('check_in_effettivo', '')).strip()
-        cout = str(r.get('check_out_effettivo', '')).strip()
-        return (cin != '' and cin != 'None' and pd.notna(r.get('check_in_effettivo'))) and \
-               (cout != '' and cout != 'None' and pd.notna(r.get('check_out_effettivo')))
+        return timbrato(r.get('check_in_effettivo')) and timbrato(r.get('check_out_effettivo'))
 
-    condizione_attivo = (
-        (turni_miei['data_dt'].notna()) & 
-        (turni_miei['data_dt'] >= limite_aperti_recenti) & 
-        (~turni_miei.apply(turno_completato, axis=1))
-    )
+    if turni_miei.empty:
+        condizione_attivo = pd.Series([], dtype=bool)
+    else:
+        condizione_attivo = (
+            (turni_miei['data_dt'].apply(lambda d: d is not None and pd.notna(d) and d >= limite_aperti_recenti).astype(bool)) &
+            (~turni_miei.apply(turno_completato, axis=1))
+        )
 
     # 1. SCHEDA TURNI ATTIVI
     with tab_attivi:
-        turni_attivi = turni_miei[condizione_attivo].copy()
-        
-        turni_attivi = turni_attivi.sort_values(
-            by=['data_dt', 'ora_inizio_prevista', 'id_turno'], 
-            ascending=[True, True, True]
-        )
+        turni_attivi = turni_miei[condizione_attivo].copy() if not turni_miei.empty else turni_miei.copy()
+
+        if not turni_attivi.empty:
+            turni_attivi = turni_attivi.sort_values(
+                by=['data_dt', 'ora_inizio_prevista', 'id_turno'],
+                ascending=[True, True, True]
+            )
 
         if turni_attivi.empty:
             st.success("🎉 Non ci sono turni da completare! Tutti i turni svolti sono stati archiviati regolarmente nello Storico.")
         else:
-            giorni_it = {
-                0: "Lunedì", 1: "Martedì", 2: "Mercoledì", 3: "Giovedì",
-                4: "Venerdì", 5: "Sabato", 6: "Domenica"
-            }
             giorno_precedente = None
-            
+
             for _, t in turni_attivi.iterrows():
                 d_attuale = t.get('data_dt')
-                
+
                 if d_attuale != giorno_precedente:
                     giorno_precedente = d_attuale
                     if pd.notna(d_attuale):
-                        nome_g = giorni_it.get(d_attuale.weekday(), "")
+                        nome_g = GIORNI_IT[d_attuale.weekday()]
                         d_label = f"{nome_g} {d_attuale.strftime('%d/%m/%Y')}"
                         if d_attuale == oggi:
                             d_label += " (OGGI)"
@@ -392,19 +514,19 @@ if st.session_state["ruolo"] == "operatore":
                         st.write(f"🏢 **Indirizzo:** {indirizzo_posto if indirizzo_posto else 'Non specificato'}")
                         st.link_button("🗺️ Apri Navigatore Google Maps", url_maps)
                     with c_inf2:
-                        st.write(f"**Check-in:** {f'✅ {c_in}' if pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None' else '⏳ Da effettuare'}")
-                        st.write(f"**Check-out:** {f'✅ {c_out}' if pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None' else '⏳ Da effettuare'}")
+                        st.write(f"**Check-in:** {f'✅ {c_in}' if timbrato(c_in) else '⏳ Da effettuare'}")
+                        st.write(f"**Check-out:** {f'✅ {c_out}' if timbrato(c_out) else '⏳ Da effettuare'}")
 
-                    gia_fatto_in = pd.notna(c_in) and str(c_in).strip() and str(c_in) != 'None'
-                    gia_fatto_out = pd.notna(c_out) and str(c_out).strip() and str(c_out) != 'None'
+                    gia_fatto_in = timbrato(c_in)
+                    gia_fatto_out = timbrato(c_out)
 
                     with st.expander(f"✍️ Timbra Servizio, Carica Foto o Aggiungi Foto Extra - Turno {id_t}"):
                         tab_in, tab_out, tab_extra = st.tabs([
-                            "🟢 Check-in (Entrata)", 
-                            "🔴 Check-out (Uscita)", 
+                            "🟢 Check-in (Entrata)",
+                            "🔴 Check-out (Uscita)",
                             "➕ Aggiungi Foto Extra"
                         ])
-                        
+
                         with tab_in:
                             if gia_fatto_in:
                                 st.success(f"✅ Check-in già registrato in data {c_in}.")
@@ -413,7 +535,7 @@ if st.session_state["ruolo"] == "operatore":
                                 with st.form(f"form_in_{id_t}"):
                                     st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
                                     foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
-                                    
+
                                     if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
                                         ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
                                         update_data = {
@@ -438,7 +560,7 @@ if st.session_state["ruolo"] == "operatore":
                                 with st.form(f"form_out_{id_t}"):
                                     st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
                                     foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
-                                    
+
                                     if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
                                         ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
                                         update_data = {
@@ -460,7 +582,7 @@ if st.session_state["ruolo"] == "operatore":
                             with st.form(f"form_extra_{id_t}"):
                                 foto_extra = st.file_uploader("Seleziona Foto Extra:", type=["jpg", "jpeg", "png"], key=f"fextra_{id_t}")
                                 desc_extra = st.text_input("Nota / Dettaglio foto (opzionale):", value="Controllo_Extra")
-                                
+
                                 if st.form_submit_button("📤 Carica Foto Extra su Cloud", type="primary", use_container_width=True):
                                     if foto_extra:
                                         salva_foto_su_storage(foto_extra, data_oggettiva, nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA")
@@ -471,11 +593,20 @@ if st.session_state["ruolo"] == "operatore":
 
                     st.markdown("---")
 
-    # 2. SCHEDA STORICO COMPLETO PASSATI
+    # 2. LA MIA SETTIMANA
+    with tab_settimana_op:
+        st.subheader("📆 Le Mie Postazioni della Settimana")
+        data_rif_op = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_ref_op_sett")
+        render_settimana_dipendente(turni_miei, data_rif_op, f"{op['nome']}")
+
+    # 3. SCHEDA STORICO COMPLETO PASSATI
     with tab_storico:
         st.subheader("📜 Storico Completo dei Tuoi Turni")
-        turni_passati = turni_miei[~condizione_attivo].copy()
-        turni_passati = turni_passati.sort_values(by='data_dt', ascending=False)
+        if turni_miei.empty:
+            turni_passati = turni_miei.copy()
+        else:
+            turni_passati = turni_miei[~condizione_attivo].copy()
+            turni_passati = turni_passati.sort_values(by='data_dt', ascending=False)
 
         if not turni_passati.empty:
             recap_storico = []
@@ -493,26 +624,28 @@ if st.session_state["ruolo"] == "operatore":
                     "Entrata (Check-in)": r_s.get('check_in_effettivo', '-'),
                     "Uscita (Check-out)": r_s.get('check_out_effettivo', '-')
                 })
-            
+
             df_st_view = pd.DataFrame(recap_storico)
             mesi_storico = ["Tutti i Mesi"] + sorted([m for m in df_st_view['Mese'].dropna().unique() if m != 'Non Riconosciuto'], reverse=True)
             scelta_m_op = st.selectbox("Filtra Storico per Mese:", mesi_storico, key="filtro_storico_op")
-            
+
             if scelta_m_op != "Tutti i Mesi":
                 df_st_view = df_st_view[df_st_view['Mese'] == scelta_m_op]
-                
+
             st.dataframe(df_st_view, use_container_width=True)
         else:
             st.info("Nessun turno archiviato nello storico.")
 
-    # 3. SCHEDA FOTO CARICATE
+    # 4. SCHEDA FOTO CARICATE
     with tab_foto_op:
         st.subheader(f"📸 Foto caricate da te ({op['nome']})")
-        mie_foto = df_turni[
-            ((df_turni['id_guardia'] == op['id']) | (df_turni['cognome_guardia'] == op['cognome'])) & 
-            (df_turni['foto_postazione'].notna()) & 
-            (df_turni['foto_postazione'] != '')
-        ]
+        if turni_miei.empty:
+            mie_foto = turni_miei
+        else:
+            mie_foto = turni_miei[
+                (turni_miei['foto_postazione'].notna()) &
+                (turni_miei['foto_postazione'] != '')
+            ]
         if not mie_foto.empty:
             cols = st.columns(3)
             for idx_f, (_, r_f) in enumerate(mie_foto.iterrows()):
@@ -546,6 +679,7 @@ if st.session_state["ruolo"] == "admin":
         "Seleziona Sezione:",
         [
             "🏢 Vista Postazione (Controllo Settimanale)",
+            "👤 Posizioni Dipendente (Settimana)",
             "📅 Gestione Turni per Postazione",
             "📊 File Recap & Controllo Postazioni",
             "👥 Gestione Dipendenti (Modifica/Aggiungi)",
@@ -557,104 +691,76 @@ if st.session_state["ruolo"] == "admin":
         label_visibility="collapsed"
     )
 
-    # 1. VISTA POSTAZIONE / DIPENDENTE SETTIMANALE
+    # 1. VISTA POSTAZIONE SETTIMANALE
     if menu_admin == "🏢 Vista Postazione (Controllo Settimanale)":
-        st.subheader("🏢 Copertura Settimanale & Posizione Dipendenti")
-        
-        tab_v_post, tab_v_dip = st.tabs(["🏢 Vista per Postazione", "👤 Vista per Dipendente (Settimanale)"])
+        st.subheader("🏢 Copertura Settimanale per Postazione")
 
-        with tab_v_post:
-            c_sel_p, c_sel_d = st.columns([2.5, 1.5])
-            with c_sel_p:
-                map_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post.iterrows()} if not df_post.empty else {}
-                scelta_p_str = st.selectbox("Seleziona Postazione da monitorare:", list(map_p.keys())) if map_p else None
-                id_p_selezionato = map_p[scelta_p_str] if scelta_p_str else None
+        c_sel_p, c_sel_d = st.columns([2.5, 1.5])
+        with c_sel_p:
+            map_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post.iterrows()} if not df_post.empty else {}
+            scelta_p_str = st.selectbox("Seleziona Postazione da monitorare:", list(map_p.keys())) if map_p else None
+            id_p_selezionato = map_p[scelta_p_str] if scelta_p_str else None
 
-            with c_sel_d:
-                data_riferimento = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_ref_post")
+        with c_sel_d:
+            data_riferimento = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_ref_post")
 
-            if id_p_selezionato:
-                inizio_sett = data_riferimento - timedelta(days=data_riferimento.weekday())
-                fine_sett = inizio_sett + timedelta(days=6)
-                st.markdown(f"#### Settimana dal `{inizio_sett.strftime('%d/%m/%Y')}` al `{fine_sett.strftime('%d/%m/%Y')}`")
+        if id_p_selezionato:
+            inizio_sett = data_riferimento - timedelta(days=data_riferimento.weekday())
+            fine_sett = inizio_sett + timedelta(days=6)
+            st.markdown(f"#### Settimana dal `{inizio_sett.strftime('%d/%m/%Y')}` al `{fine_sett.strftime('%d/%m/%Y')}`")
 
-                turni_post = df_turni[df_turni['id_postazione'] == id_p_selezionato].copy()
-                giorni_nomi = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
-                righe_sett = []
+            turni_post = df_turni[df_turni['id_postazione'] == id_p_selezionato].copy()
+            righe_sett = []
 
-                for i in range(7):
-                    g_curr = inizio_sett + timedelta(days=i)
-                    tg = turni_post[turni_post['data_dt'] == g_curr]
-                    
-                    if not tg.empty:
-                        tg = tg.sort_values(by='ora_inizio_prevista', ascending=True)
-                        for _, t in tg.iterrows():
-                            cin = t.get('check_in_effettivo', '')
-                            cout = t.get('check_out_effettivo', '')
-                            righe_sett.append({
-                                "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
-                                "Turno ID": t.get('id_turno', ''),
-                                "Cognome Guardia": t.get('cognome_guardia', ''),
-                                "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
-                                "Entrata (Check-in)": cin if pd.notna(cin) and str(cin).strip() and str(cin) != 'None' else "⏳ Non timbrato",
-                                "Uscita (Check-out)": cout if pd.notna(cout) and str(cout).strip() and str(cout) != 'None' else "⏳ Non timbrato",
-                                "Registrato Da": t.get('registrato_da', 'Sistema')
-                            })
-                    else:
+            for i in range(7):
+                g_curr = inizio_sett + timedelta(days=i)
+                tg = turni_post[turni_post['data_dt'] == g_curr]
+
+                if not tg.empty:
+                    tg = tg.sort_values(by='ora_inizio_prevista', ascending=True)
+                    for _, t in tg.iterrows():
+                        cin = t.get('check_in_effettivo', '')
+                        cout = t.get('check_out_effettivo', '')
                         righe_sett.append({
-                            "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
-                            "Turno ID": "-", "Cognome Guardia": "❌ NESSUNA GUARDIA", "Orario": "-",
-                            "Entrata (Check-in)": "-", "Uscita (Check-out)": "-", "Registrato Da": "-"
+                            "Giorno": f"{GIORNI_IT[i]} ({g_curr.strftime('%d/%m')})",
+                            "Turno ID": t.get('id_turno', ''),
+                            "Cognome Guardia": t.get('cognome_guardia', ''),
+                            "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
+                            "Entrata (Check-in)": cin if timbrato(cin) else "⏳ Non timbrato",
+                            "Uscita (Check-out)": cout if timbrato(cout) else "⏳ Non timbrato",
+                            "Registrato Da": t.get('registrato_da', 'Sistema')
                         })
-                st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
+                else:
+                    righe_sett.append({
+                        "Giorno": f"{GIORNI_IT[i]} ({g_curr.strftime('%d/%m')})",
+                        "Turno ID": "-", "Cognome Guardia": "❌ NESSUNA GUARDIA", "Orario": "-",
+                        "Entrata (Check-in)": "-", "Uscita (Check-out)": "-", "Registrato Da": "-"
+                    })
+            st.dataframe(pd.DataFrame(righe_sett), use_container_width=True)
 
-        with tab_v_dip:
-            c_sel_g, c_sel_dg = st.columns([2.5, 1.5])
-            with c_sel_g:
-                map_g = {f"{r['cognome']} {r['nome']} ({r['id_guardia']})": str(r['cognome']).strip() for _, r in df_dip.iterrows()} if not df_dip.empty else {}
-                scelta_g_str = st.selectbox("Seleziona Dipendente da monitorare:", list(map_g.keys())) if map_g else None
-                cognome_selezionato_v = map_g[scelta_g_str] if scelta_g_str else None
+    # 1-bis. POSIZIONI DIPENDENTE (SETTIMANA)  <-- NUOVA SEZIONE
+    elif menu_admin == "👤 Posizioni Dipendente (Settimana)":
+        st.subheader("👤 Posizioni Ricoperte da un Dipendente durante la Settimana")
+        st.caption("Scegli un dipendente e una settimana: vedrai in quali postazioni lavora ogni giorno, gli orari, le ore totali e le timbrature.")
 
-            with c_sel_dg:
-                data_riferimento_g = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_ref_dip")
+        if df_dip.empty:
+            st.info("Nessun dipendente presente in anagrafica.")
+        else:
+            df_dip_ord = df_dip.sort_values(by='cognome', key=lambda s: s.astype(str).str.lower())
+            map_dip_sett = {
+                f"{r['cognome']} {r.get('nome', '')} ({r['id_guardia']})": (str(r['id_guardia']).strip(), str(r['cognome']).strip())
+                for _, r in df_dip_ord.iterrows()
+            }
 
-            if cognome_selezionato_v:
-                inizio_sett_g = data_riferimento_g - timedelta(days=data_riferimento_g.weekday())
-                fine_sett_g = inizio_sett_g + timedelta(days=6)
-                st.markdown(f"#### Dove si trova {scelta_g_str} — Settimana dal `{inizio_sett_g.strftime('%d/%m/%Y')}` al `{fine_sett_g.strftime('%d/%m/%Y')}`")
+            c_dip, c_data = st.columns([2.5, 1.5])
+            with c_dip:
+                scelta_dip_sett = st.selectbox("Seleziona Dipendente:", list(map_dip_sett.keys()), key="sel_dip_sett")
+            with c_data:
+                data_rif_dip = st.date_input("Settimana contenente il giorno:", value=data_italiana(), key="dt_ref_dip_sett")
 
-                turni_guardia = df_turni[df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == cognome_selezionato_v.lower()].copy()
-                giorni_nomi = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
-                righe_sett_g = []
-
-                for i in range(7):
-                    g_curr = inizio_sett_g + timedelta(days=i)
-                    tg = turni_guardia[turni_guardia['data_dt'] == g_curr]
-                    
-                    if not tg.empty:
-                        tg = tg.sort_values(by='ora_inizio_prevista', ascending=True)
-                        for _, t in tg.iterrows():
-                            id_pst_t = str(t.get('id_postazione', '')).strip()
-                            p_info = df_post[df_post['id_postazione'] == id_pst_t]
-                            nome_sede = p_info.iloc[0]['nome_cliente'] if not p_info.empty else id_pst_t
-                            
-                            cin = t.get('check_in_effettivo', '')
-                            cout = t.get('check_out_effettivo', '')
-                            righe_sett_g.append({
-                                "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
-                                "Turno ID": t.get('id_turno', ''),
-                                "Postazione Assegnata": nome_sede,
-                                "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
-                                "Entrata (Check-in)": cin if pd.notna(cin) and str(cin).strip() and str(cin) != 'None' else "⏳ Non timbrato",
-                                "Uscita (Check-out)": cout if pd.notna(cout) and str(cout).strip() and str(cout) != 'None' else "⏳ Non timbrato"
-                            })
-                    else:
-                        righe_sett_g.append({
-                            "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
-                            "Turno ID": "-", "Postazione Assegnata": "🏠 NESSUN TURNO / RIPOSO", "Orario": "-",
-                            "Entrata (Check-in)": "-", "Uscita (Check-out)": "-"
-                        })
-                st.dataframe(pd.DataFrame(righe_sett_g), use_container_width=True)
+            id_dip_sel, cogn_dip_sel = map_dip_sett[scelta_dip_sett]
+            turni_dip_sel = turni_del_dipendente(id_dip_sel, cogn_dip_sel)
+            render_settimana_dipendente(turni_dip_sel, data_rif_dip, scelta_dip_sett)
 
     # 2. GESTIONE TURNI PER POSTAZIONE
     elif menu_admin == "📅 Gestione Turni per Postazione":
@@ -663,31 +769,30 @@ if st.session_state["ruolo"] == "admin":
             for _, post in df_post.iterrows():
                 id_pst = str(post['id_postazione']).strip()
                 nome_pst = post['nome_cliente']
-                
+
                 with st.expander(f"📍 Postazione: {id_pst} — {nome_pst}"):
                     turni_questa_post = df_turni[df_turni['id_postazione'] == id_pst].copy()
-                    
+
                     if not turni_questa_post.empty:
                         st.write("**Turni programmati (Seleziona per eliminare):**")
-                        
+
                         df_del_view = turni_questa_post[['id_turno', 'data', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo']].copy()
                         df_del_view.insert(0, "Seleziona", False)
-                        
+
                         edited_del = st.data_editor(
                             df_del_view,
                             use_container_width=True,
                             hide_index=True,
                             key=f"editor_del_{id_pst}"
                         )
-                        
+
                         if st.button(f"🗑️ Elimina Turni Selezionati da {nome_pst}", key=f"btn_del_{id_pst}", type="secondary"):
                             selezionati_del = edited_del[edited_del['Seleziona'] == True]
                             if not selezionati_del.empty:
                                 ids_del = selezionati_del['id_turno'].tolist()
                                 for tid in ids_del:
                                     supabase.table("turni").delete().eq("id_turno", tid).execute()
-                                
-                                st.cache_resource.clear()
+
                                 registra_log(adm["nome"], "CANCELLAZIONE_TURNI", f"Eliminati turni da {nome_pst}: {ids_del}")
                                 st.success(f"✅ Eliminati con successo {len(ids_del)} turni!")
                                 time.sleep(0.5)
@@ -714,18 +819,22 @@ if st.session_state["ruolo"] == "admin":
 
                         match_id = re.search(r'\((.*?)\)', guardia_sel)
                         g_codice = match_id.group(1) if match_id else guardia_sel.split()[0]
-                        
+
                         dip_trovato = df_dip[df_dip['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()]
                         cognome_selezionato = dip_trovato.iloc[0]['cognome'].strip() if not dip_trovato.empty else guardia_sel.split()[0]
 
                         data_formattata_db = data_nuovo_t.strftime("%d/%m/%Y")
-                        
-                        conflitti = df_turni[
-                            ((df_turni['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()) | 
-                             (df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == cognome_selezionato.lower())) & 
-                            (df_turni['data'] == data_formattata_db)
-                        ]
-                        
+
+                        # Controllo conflitti (confronto sulla data normalizzata)
+                        if df_turni.empty:
+                            conflitti = df_turni
+                        else:
+                            conflitti = df_turni[
+                                ((df_turni['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()) |
+                                 (df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == cognome_selezionato.lower())) &
+                                (df_turni['data_dt'] == data_nuovo_t)
+                            ]
+
                         forza_creazione = False
                         if not conflitti.empty:
                             st.warning(f"⚠️ ATTENZIONE: Il dipendente {guardia_sel} risulta GIÀ assegnato il giorno {data_formattata_db}!")
@@ -749,7 +858,6 @@ if st.session_state["ruolo"] == "admin":
                                 }
                                 try:
                                     supabase.table("turni").insert(record).execute()
-                                    st.cache_resource.clear()  # Pulisce la cache per ricaricare subito i dati freschi
                                     nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato} in data {data_formattata_db}" + (" [FORZATO]" if not conflitti.empty else "")
                                     registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
                                     st.success("✅ Turno salvato su Cloud con successo!")
@@ -765,7 +873,7 @@ if st.session_state["ruolo"] == "admin":
             recap_df = df_turni.merge(df_post[['id_postazione', 'nome_cliente', 'indirizzo_sede']], on='id_postazione', how='left')
             tutti_i_mesi = ["Tutti i Mesi"] + sorted([m for m in recap_df['Mese_Anno'].dropna().unique() if m != "Non Riconosciuto"], reverse=True)
             scelta_m = st.selectbox("Filtra per Mese:", tutti_i_mesi)
-            
+
             view_recap = recap_df if scelta_m == "Tutti i Mesi" else recap_df[recap_df['Mese_Anno'] == scelta_m]
             colonne_show = ['id_turno', 'data', 'Mese_Anno', 'id_postazione', 'nome_cliente', 'indirizzo_sede', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo', 'registrato_da']
             colonne_show = [c for c in colonne_show if c in view_recap.columns]
@@ -806,7 +914,6 @@ if st.session_state["ruolo"] == "admin":
                             "email": mod_email.strip(),
                             "password": mod_pwd.strip()
                         }).eq("id_guardia", id_g_mod).execute()
-                        st.cache_resource.clear()
                         registra_log(adm["nome"], "MODIFICA_DIPENDENTE", f"Aggiornato {mod_cognome} ({id_g_mod})")
                         st.success("Dati aggiornati su Cloud!")
                         st.rerun()
@@ -833,13 +940,14 @@ if st.session_state["ruolo"] == "admin":
                             "email": nuova_email.strip(),
                             "password": nuova_pwd.strip()
                         }).execute()
-                        st.cache_resource.clear()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
                         st.rerun()
 
         st.markdown("#### Anagrafica Attiva")
-        st.dataframe(df_dip[['id_guardia', 'cognome', 'nome', 'email', 'password']], use_container_width=True)
+        # La colonna password non viene più mostrata in tabella
+        colonne_anagrafica = [c for c in ['id_guardia', 'cognome', 'nome', 'email'] if c in df_dip.columns]
+        st.dataframe(df_dip[colonne_anagrafica], use_container_width=True)
 
     # 5. GESTIONE POSTAZIONI
     elif menu_admin == "📍 Gestione Postazioni (Modifica/Aggiungi)":
@@ -850,7 +958,7 @@ if st.session_state["ruolo"] == "admin":
             if not df_post.empty:
                 df_post_sorted = df_post.sort_values(by='id_postazione', ascending=True)
                 map_mod_p = {f"{r['id_postazione']} - {r['nome_cliente']}": str(r['id_postazione']).strip() for _, r in df_post_sorted.iterrows()}
-                
+
                 scelta_p_mod = st.selectbox("Seleziona Postazione:", list(map_mod_p.keys()))
                 id_pst_sel = map_mod_p[scelta_p_mod]
                 riga_post = df_post_sorted[df_post_sorted['id_postazione'] == id_pst_sel].iloc[0]
@@ -873,14 +981,12 @@ if st.session_state["ruolo"] == "admin":
                             "nome_cliente": mod_nome_post.strip(),
                             "indirizzo_sede": mod_ind_post.strip()
                         }).eq("id_postazione", id_pst_sel).execute()
-                        st.cache_resource.clear()
                         registra_log(adm["nome"], "MODIFICA_POSTAZIONE", f"Aggiornata {mod_nome_post} ({id_pst_sel})")
                         st.success("Postazione aggiornata su Cloud!")
                         st.rerun()
 
                     if btn_elimina_p:
                         supabase.table("postazioni").delete().eq("id_postazione", id_pst_sel).execute()
-                        st.cache_resource.clear()
                         registra_log(adm["nome"], "ELIMINAZIONE_POSTAZIONE", f"Eliminata postazione {id_pst_sel} - {riga_post.get('nome_cliente')}")
                         st.success(f"Postazione {id_pst_sel} eliminata con successo!")
                         st.rerun()
@@ -903,7 +1009,6 @@ if st.session_state["ruolo"] == "admin":
                             "nome_cliente": nuovo_nome_p.strip(),
                             "indirizzo_sede": nuovo_ind_p.strip()
                         }).execute()
-                        st.cache_resource.clear()
                         registra_log(adm["nome"], "AGGIUNGI_POSTAZIONE", f"Creata {nuovo_nome_p} ({nuovo_id_p})")
                         st.success(f"Postazione {nuovo_nome_p} registrata!")
                         st.rerun()
@@ -915,18 +1020,13 @@ if st.session_state["ruolo"] == "admin":
     elif menu_admin == "💶 Piano Economico (Fatturato & Ore)":
         st.subheader("💶 Piano Economico & Monitoraggio Finanziario")
         tab_eco_fatturato, tab_eco_dettaglio = st.tabs([
-            "📈 1. Ore Lavorate per Mese", 
+            "📈 1. Ore Lavorate per Mese",
             "🏢 2. Dettaglio Ore Postazione & Elenco Guardie"
         ])
 
         with tab_eco_fatturato:
             if not df_turni.empty:
                 st.markdown("#### 🕒 Ore Svolte per Dipendente Suddivise per Mese")
-                def estrai_ore_t(r):
-                    cin, cout = r.get('check_in_effettivo'), r.get('check_out_effettivo')
-                    if pd.notna(cin) and pd.notna(cout) and str(cin).strip() and str(cout).strip() and str(cin) != 'None' and str(cout) != 'None':
-                        return calcola_ore(cin, cout)
-                    return calcola_ore(r.get('ora_inizio_prevista', '00:00'), r.get('ora_fine_prevista', '00:00'))
 
                 df_calc = df_turni.copy()
                 df_calc['Ore_Turno'] = df_calc.apply(estrai_ore_t, axis=1)
@@ -959,7 +1059,7 @@ if st.session_state["ruolo"] == "admin":
                     id_pst_filtro = map_pst[post_filtro_str] if post_filtro_str else None
 
                 turni_filtrati = df_dett[
-                    (df_dett['Mese_Anno'] == mese_filtro) & 
+                    (df_dett['Mese_Anno'] == mese_filtro) &
                     (df_dett['id_postazione'] == id_pst_filtro)
                 ].copy()
 
@@ -995,7 +1095,7 @@ if st.session_state["ruolo"] == "admin":
 
             if operatori_cartelle:
                 op_scelto = st.selectbox("👤 Seleziona Operatore:", sorted(operatori_cartelle))
-                
+
                 if op_scelto:
                     date_items = supabase.storage.from_(BUCKET_FOTO).list(op_scelto)
                     date_cartelle = [item["name"] for item in date_items if "." not in item["name"]]
@@ -1014,7 +1114,7 @@ if st.session_state["ruolo"] == "admin":
                                 if pos_scelta:
                                     path_file_finali = f"{op_scelto}/{data_scelta}/{pos_scelta}"
                                     file_items = supabase.storage.from_(BUCKET_FOTO).list(path_file_finali)
-                                    
+
                                     immagini_trovate = [item for item in file_items if item.get("name") and "." in item.get("name")]
 
                                     if immagini_trovate:
@@ -1032,7 +1132,7 @@ if st.session_state["ruolo"] == "admin":
 
                                                 with cols[idx_f % 3]:
                                                     st.image(url_pub, caption=f"📄 {nome_f.replace('.jpg', '').replace('_', ' ')}", use_container_width=True)
-                                                    if st.checkbox(f"Seleziona foto", key=f"chk_ger_{idx_f}_{nome_f}"):
+                                                    if st.checkbox("Seleziona foto", key=f"chk_ger_{idx_f}_{nome_f}"):
                                                         paths_selezionati.append(f_path_rel)
 
                                             st.markdown("---")
@@ -1042,7 +1142,6 @@ if st.session_state["ruolo"] == "admin":
                                                 if paths_selezionati:
                                                     try:
                                                         supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
-                                                        st.cache_resource.clear()
                                                         registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal percorso {path_file_finali}")
                                                         st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
                                                         time.sleep(1)
