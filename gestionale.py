@@ -19,7 +19,7 @@ def ora_italiana():
 def data_italiana():
     return ora_italiana().date()
 
-# --- CONNESSIONE SUPABASE ---
+# --- CONNESSIONE SUPABASE (CON PULIZIA CACHE FORZATA) ---
 @st.cache_resource
 def init_supabase():
     url = st.secrets["SUPABASE_URL"]
@@ -131,7 +131,6 @@ def carica_dati():
             'foto_postazione', 'registrato_da'
         ])
 
-    # Aggiungi colonna data_dt standardizzata
     if not df_turni.empty and 'data' in df_turni.columns:
         df_turni['data_dt'] = df_turni['data'].apply(analizza_data_completa)
         df_turni['Mese_Anno'] = df_turni['data_dt'].apply(lambda d: d.strftime("%m/%Y") if pd.notna(d) else "Non Riconosciuto")
@@ -688,6 +687,7 @@ if st.session_state["ruolo"] == "admin":
                                 for tid in ids_del:
                                     supabase.table("turni").delete().eq("id_turno", tid).execute()
                                 
+                                st.cache_resource.clear()
                                 registra_log(adm["nome"], "CANCELLAZIONE_TURNI", f"Eliminati turni da {nome_pst}: {ids_del}")
                                 st.success(f"✅ Eliminati con successo {len(ids_del)} turni!")
                                 time.sleep(0.5)
@@ -718,7 +718,6 @@ if st.session_state["ruolo"] == "admin":
                         dip_trovato = df_dip[df_dip['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()]
                         cognome_selezionato = dip_trovato.iloc[0]['cognome'].strip() if not dip_trovato.empty else guardia_sel.split()[0]
 
-                        # Normalizzazione data per il controllo conflitti
                         data_formattata_db = data_nuovo_t.strftime("%d/%m/%Y")
                         
                         conflitti = df_turni[
@@ -749,7 +748,8 @@ if st.session_state["ruolo"] == "admin":
                                     "registrato_da": str(adm["nome"]).strip()
                                 }
                                 try:
-                                    res_ins = supabase.table("turni").insert(record).execute()
+                                    supabase.table("turni").insert(record).execute()
+                                    st.cache_resource.clear()  # Pulisce la cache per ricaricare subito i dati freschi
                                     nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato} in data {data_formattata_db}" + (" [FORZATO]" if not conflitti.empty else "")
                                     registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
                                     st.success("✅ Turno salvato su Cloud con successo!")
@@ -806,6 +806,7 @@ if st.session_state["ruolo"] == "admin":
                             "email": mod_email.strip(),
                             "password": mod_pwd.strip()
                         }).eq("id_guardia", id_g_mod).execute()
+                        st.cache_resource.clear()
                         registra_log(adm["nome"], "MODIFICA_DIPENDENTE", f"Aggiornato {mod_cognome} ({id_g_mod})")
                         st.success("Dati aggiornati su Cloud!")
                         st.rerun()
@@ -832,6 +833,7 @@ if st.session_state["ruolo"] == "admin":
                             "email": nuova_email.strip(),
                             "password": nuova_pwd.strip()
                         }).execute()
+                        st.cache_resource.clear()
                         registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                         st.success(f"Dipendente {nuovo_cognome} registrato!")
                         st.rerun()
@@ -871,12 +873,14 @@ if st.session_state["ruolo"] == "admin":
                             "nome_cliente": mod_nome_post.strip(),
                             "indirizzo_sede": mod_ind_post.strip()
                         }).eq("id_postazione", id_pst_sel).execute()
+                        st.cache_resource.clear()
                         registra_log(adm["nome"], "MODIFICA_POSTAZIONE", f"Aggiornata {mod_nome_post} ({id_pst_sel})")
                         st.success("Postazione aggiornata su Cloud!")
                         st.rerun()
 
                     if btn_elimina_p:
                         supabase.table("postazioni").delete().eq("id_postazione", id_pst_sel).execute()
+                        st.cache_resource.clear()
                         registra_log(adm["nome"], "ELIMINAZIONE_POSTAZIONE", f"Eliminata postazione {id_pst_sel} - {riga_post.get('nome_cliente')}")
                         st.success(f"Postazione {id_pst_sel} eliminata con successo!")
                         st.rerun()
@@ -899,6 +903,7 @@ if st.session_state["ruolo"] == "admin":
                             "nome_cliente": nuovo_nome_p.strip(),
                             "indirizzo_sede": nuovo_ind_p.strip()
                         }).execute()
+                        st.cache_resource.clear()
                         registra_log(adm["nome"], "AGGIUNGI_POSTAZIONE", f"Creata {nuovo_nome_p} ({nuovo_id_p})")
                         st.success(f"Postazione {nuovo_nome_p} registrata!")
                         st.rerun()
@@ -1037,6 +1042,7 @@ if st.session_state["ruolo"] == "admin":
                                                 if paths_selezionati:
                                                     try:
                                                         supabase.storage.from_(BUCKET_FOTO).remove(paths_selezionati)
+                                                        st.cache_resource.clear()
                                                         registra_log(adm["nome"], "CANCELLAZIONE_FOTO_CLOUD", f"Eliminate {len(paths_selezionati)} foto dal percorso {path_file_finali}")
                                                         st.success(f"✅ {len(paths_selezionati)} foto eliminate con successo dal cloud!")
                                                         time.sleep(1)
