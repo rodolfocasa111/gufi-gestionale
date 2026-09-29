@@ -68,6 +68,45 @@ def registra_log(autore, azione, dettagli):
     except Exception as e:
         st.error(f"Errore registrazione log: {e}")
 
+# --- PARSER DATA ROBUSTO ---
+def analizza_data_completa(val):
+    if pd.isna(val) or not str(val).strip():
+        return None
+    s = str(val).strip().lower()
+    for g in ['lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica']:
+        s = s.replace(g, '').strip()
+    
+    mesi = {
+        'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
+        'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
+        'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12'
+    }
+    for m_it, m_num in mesi.items():
+        if m_it in s:
+            s = s.replace(m_it, m_num)
+            break
+            
+    s = s.replace("-", "/").replace(".", "/")
+    parti = s.split()
+    
+    if len(parti) >= 3 and parti[0].isdigit() and parti[1].isdigit() and parti[2].isdigit():
+        s_data = f"{int(parti[0]):02d}/{int(parti[1]):02d}/{parti[2]}"
+    else:
+        s_data = parti[0] if parti else s
+
+    for fmt in ['%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y']:
+        try:
+            return datetime.strptime(s_data, fmt).date()
+        except Exception:
+            pass
+    try:
+        dt = pd.to_datetime(val, dayfirst=True, errors='coerce')
+        if pd.notna(dt):
+            return dt.date()
+    except Exception:
+        pass
+    return None
+
 # --- CARICAMENTO DATI DA SUPABASE ---
 def carica_dati():
     res_dip = supabase.table("dipendenti").select("*").limit(2000).execute()
@@ -91,6 +130,14 @@ def carica_dati():
             'check_out_effettivo', 'gps_check_in', 'gps_check_out',
             'foto_postazione', 'registrato_da'
         ])
+
+    # Aggiungi colonna data_dt standardizzata
+    if not df_turni.empty and 'data' in df_turni.columns:
+        df_turni['data_dt'] = df_turni['data'].apply(analizza_data_completa)
+        df_turni['Mese_Anno'] = df_turni['data_dt'].apply(lambda d: d.strftime("%m/%Y") if pd.notna(d) else "Non Riconosciuto")
+    else:
+        df_turni['data_dt'] = None
+        df_turni['Mese_Anno'] = "Non Riconosciuto"
 
     return df_turni, df_dip, df_post
 
@@ -160,45 +207,6 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
-# --- PARSER DATA COMPLETO ---
-def analizza_data_completa(val):
-    if pd.isna(val) or not str(val).strip():
-        return None
-    s = str(val).strip().lower()
-    for g in ['lunedì', 'martedì', 'mercoledì', 'giovedì', 'venerdì', 'sabato', 'domenica']:
-        s = s.replace(g, '').strip()
-    
-    mesi = {
-        'gennaio': '01', 'febbraio': '02', 'marzo': '03', 'aprile': '04',
-        'maggio': '05', 'giugno': '06', 'luglio': '07', 'agosto': '08',
-        'settembre': '09', 'ottobre': '10', 'novembre': '11', 'dicembre': '12'
-    }
-    for m_it, m_num in mesi.items():
-        if m_it in s:
-            s = s.replace(m_it, m_num)
-            break
-            
-    s = s.replace("-", "/").replace(".", "/")
-    parti = s.split()
-    
-    if len(parti) >= 3 and parti[0].isdigit() and parti[1].isdigit() and parti[2].isdigit():
-        s_data = f"{int(parti[0]):02d}/{int(parti[1]):02d}/{parti[2]}"
-    else:
-        s_data = parti[0] if parti else s
-
-    for fmt in ['%d/%m/%Y', '%Y/%m/%d', '%m/%d/%Y']:
-        try:
-            return datetime.strptime(s_data, fmt).date()
-        except Exception:
-            pass
-    try:
-        dt = pd.to_datetime(val, dayfirst=True, errors='coerce')
-        if pd.notna(dt):
-            return dt.date()
-    except Exception:
-        pass
-    return None
-
 def calcola_ore(ora_inizio, ora_fine):
     try:
         if pd.isna(ora_inizio) or pd.isna(ora_fine):
@@ -226,13 +234,6 @@ def calcola_ore(ora_inizio, ora_fine):
         return 0.0
     except Exception:
         return 0.0
-
-if not df_turni.empty and 'data' in df_turni.columns:
-    df_turni['data_dt'] = df_turni['data'].apply(analizza_data_completa)
-    df_turni['Mese_Anno'] = df_turni['data_dt'].apply(lambda d: d.strftime("%m/%Y") if pd.notna(d) else "Non Riconosciuto")
-else:
-    df_turni['data_dt'] = None
-    df_turni['Mese_Anno'] = "Non Riconosciuto"
 
 # -------------------------------------------------------------------------------------------------
 # LOGIN
@@ -557,9 +558,9 @@ if st.session_state["ruolo"] == "admin":
         label_visibility="collapsed"
     )
 
-    # 1. VISTA POSTAZIONE SETTIMANALE
+    # 1. VISTA POSTAZIONE / DIPENDENTE SETTIMANALE
     if menu_admin == "🏢 Vista Postazione (Controllo Settimanale)":
-        st.subheader("🏢 Copertura Settimanale per Singola Postazione")
+        st.subheader("🏢 Copertura Settimanale & Posizione Dipendenti")
         
         tab_v_post, tab_v_dip = st.tabs(["🏢 Vista per Postazione", "👤 Vista per Dipendente (Settimanale)"])
 
@@ -717,14 +718,18 @@ if st.session_state["ruolo"] == "admin":
                         dip_trovato = df_dip[df_dip['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()]
                         cognome_selezionato = dip_trovato.iloc[0]['cognome'].strip() if not dip_trovato.empty else guardia_sel.split()[0]
 
+                        # Normalizzazione data per il controllo conflitti
+                        data_formattata_db = data_nuovo_t.strftime("%d/%m/%Y")
+                        
                         conflitti = df_turni[
-                            ((df_turni['id_guardia'] == g_codice) | (df_turni['cognome_guardia'] == cognome_selezionato)) & 
-                            (df_turni['data_dt'] == data_nuovo_t)
+                            ((df_turni['id_guardia'].astype(str).str.strip().str.lower() == g_codice.lower()) | 
+                             (df_turni['cognome_guardia'].astype(str).str.strip().str.lower() == cognome_selezionato.lower())) & 
+                            (df_turni['data'] == data_formattata_db)
                         ]
                         
                         forza_creazione = False
                         if not conflitti.empty:
-                            st.warning(f"⚠️ ATTENZIONE: Il dipendente {guardia_sel} risulta GIÀ assegnato il giorno {data_nuovo_t.strftime('%d/%m/%Y')}!")
+                            st.warning(f"⚠️ ATTENZIONE: Il dipendente {guardia_sel} risulta GIÀ assegnato il giorno {data_formattata_db}!")
                             forza_creazione = st.checkbox("Conferma comunque turno doppio", key=f"chk_force_{id_pst}")
 
                         btn_crea = st.form_submit_button("💾 Registra Turno su Cloud", type="primary")
@@ -733,8 +738,6 @@ if st.session_state["ruolo"] == "admin":
                             if not conflitti.empty and not forza_creazione:
                                 st.error("Operazione bloccata: conferma la casella per il turno doppio.")
                             else:
-                                # Salvataggio formattato in modo rigoroso DD/MM/YYYY per Supabase
-                                data_formattata_db = data_nuovo_t.strftime("%d/%m/%Y")
                                 record = {
                                     "id_turno": str(id_nuovo_t).strip(),
                                     "data": data_formattata_db,
@@ -746,7 +749,7 @@ if st.session_state["ruolo"] == "admin":
                                     "registrato_da": str(adm["nome"]).strip()
                                 }
                                 try:
-                                    supabase.table("turni").insert(record).execute()
+                                    res_ins = supabase.table("turni").insert(record).execute()
                                     nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato} in data {data_formattata_db}" + (" [FORZATO]" if not conflitti.empty else "")
                                     registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
                                     st.success("✅ Turno salvato su Cloud con successo!")
