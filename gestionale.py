@@ -557,7 +557,7 @@ if st.session_state["ruolo"] == "admin":
         label_visibility="collapsed"
     )
 
-    # 1. VISTA POSTAZIONE SETTIMANALE
+    # 1. VISTA POSTAZIONE SETTIMANALE (OTTIMIZZATA PER GESTIRE TURNI MULTIPLI NELLO STESSO GIORNO)
     if menu_admin == "🏢 Vista Postazione (Controllo Settimanale)":
         st.subheader("🏢 Copertura Settimanale per Singola Postazione")
         c_sel_p, c_sel_d = st.columns([2.5, 1.5])
@@ -575,28 +575,31 @@ if st.session_state["ruolo"] == "admin":
             st.markdown(f"#### Settimana dal `{inizio_sett.strftime('%d/%m/%Y')}` al `{fine_sett.strftime('%d/%m/%Y')}`")
 
             turni_post = df_turni[df_turni['id_postazione'] == id_p_selezionato].copy()
-            giorni_nomi = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
+            giorni_it = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
             righe_sett = []
 
             for i in range(7):
                 g_curr = inizio_sett + timedelta(days=i)
                 tg = turni_post[turni_post['data_dt'] == g_curr]
+                
                 if not tg.empty:
+                    # Ordina per orario di inizio in modo da gestire correttamente eventuali doppi turni nello stesso giorno
+                    tg = tg.sort_values(by='ora_inizio_prevista', ascending=True)
                     for _, t in tg.iterrows():
                         cin = t.get('check_in_effettivo', '')
                         cout = t.get('check_out_effettivo', '')
                         righe_sett.append({
-                            "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
+                            "Giorno": f"{giorni_it[i]} ({g_curr.strftime('%d/%m')})",
                             "Turno ID": t.get('id_turno', ''),
                             "Cognome Guardia": t.get('cognome_guardia', ''),
                             "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
-                            "Entrata (Check-in)": cin if pd.notna(cin) and str(cin).strip() else "⏳ Non timbrato",
-                            "Uscita (Check-out)": cout if pd.notna(cout) and str(cout).strip() else "⏳ Non timbrato",
+                            "Entrata (Check-in)": cin if pd.notna(cin) and str(cin).strip() and str(cin) != 'None' else "⏳ Non timbrato",
+                            "Uscita (Check-out)": cout if pd.notna(cout) and str(cout).strip() and str(cout) != 'None' else "⏳ Non timbrato",
                             "Registrato Da": t.get('registrato_da', 'Sistema')
                         })
                 else:
                     righe_sett.append({
-                        "Giorno": f"{giorni_nomi[i]} ({g_curr.strftime('%d/%m')})",
+                        "Giorno": f"{giorni_it[i]} ({g_curr.strftime('%d/%m')})",
                         "Turno ID": "-", "Cognome Guardia": "❌ NESSUNA GUARDIA", "Orario": "-",
                         "Entrata (Check-in)": "-", "Uscita (Check-out)": "-", "Registrato Da": "-"
                     })
@@ -690,9 +693,7 @@ if st.session_state["ruolo"] == "admin":
                                     "registrato_da": str(adm["nome"]).strip()
                                 }
                                 try:
-                                    # Esecuzione scrittura con controllo risposta rigoroso
-                                    res_ins = supabase.table("turni").insert(record).execute()
-                                    
+                                    supabase.table("turni").insert(record).execute()
                                     nota = f"Creato turno {id_nuovo_t} per {cognome_selezionato}" + (" [FORZATO]" if not conflitti.empty else "")
                                     registra_log(adm["nome"], "CREAZIONE_TURNO", nota)
                                     st.success("✅ Turno salvato su Cloud con successo!")
