@@ -278,6 +278,60 @@ def estrai_ore_t(r):
         return calcola_ore(cin, cout)
     return calcola_ore(r.get('ora_inizio_prevista', '00:00'), r.get('ora_fine_prevista', '00:00'))
 
+# --- TIMBRATURA (CHECK-IN / CHECK-OUT) ---
+# Niente st.form: il file_uploader fuori dal form fa un rerun solo quando la foto
+# è arrivata al server, quindi il pulsante resta disabilitato finché l'upload non
+# è completo. Ogni foto può essere usata per una sola timbratura: se il browser
+# del telefono si riconnette (es. dopo aver aperto la fotocamera) e ripete un
+# vecchio click, la timbratura non viene registrata di nuovo in automatico.
+def render_timbratura(tipo, id_t, op, data_oggettiva, nome_posto):
+    if tipo == "IN":
+        campo_ora, campo_gps = "check_in_effettivo", "gps_check_in"
+        etichetta_foto, etichetta_btn = "Foto Entrata Postazione:", "✅ Conferma Check-in"
+        azione_log, nome_timbr = "TIMBRATURA_CHECKIN", "Check-in"
+    else:
+        campo_ora, campo_gps = "check_out_effettivo", "gps_check_out"
+        etichetta_foto, etichetta_btn = "Foto Uscita / Consegna:", "🔴 Conferma Check-out"
+        azione_log, nome_timbr = "TIMBRATURA_CHECKOUT", "Check-out"
+
+    chiave = f"{tipo}_{id_t}"
+    foto_usate = st.session_state.setdefault("foto_timbrature_usate", {})
+
+    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_{tipo.lower()}_{id_t}")
+    foto = st.file_uploader(etichetta_foto, type=["jpg", "jpeg", "png"], key=f"f{tipo.lower()}_{id_t}")
+
+    id_foto = getattr(foto, "file_id", None) or (f"{foto.name}_{foto.size}" if foto else None)
+    foto_pronta = foto is not None and foto_usate.get(chiave) != id_foto
+
+    if foto is None:
+        st.warning("📸 Scatta o seleziona la foto e attendi che il caricamento finisca: il pulsante si attiverà da solo.")
+
+    if not st.button(etichetta_btn, type="primary", use_container_width=True, disabled=not foto_pronta, key=f"btn_{chiave}"):
+        return
+
+    # Ricontrolla sul database: se il turno risulta già timbrato non sovrascrivere l'orario
+    riga = supabase.table("turni").select(campo_ora).eq("id_turno", id_t).execute().data or []
+    if riga and timbrato(riga[0].get(campo_ora)):
+        st.warning(f"{nome_timbr} già registrato per questo turno.")
+        st.rerun()
+
+    try:
+        foto_url = salva_foto_su_storage(foto, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, tipo)
+    except Exception:
+        st.error("❌ Foto non caricata: timbratura NON registrata. Controlla la connessione e riprova.")
+        return
+    update_data = {
+        campo_ora: ora_italiana().strftime("%d/%m/%Y %H:%M:%S"),
+        campo_gps: "41.229565, 14.508582",
+        "registrato_da": f"{op['nome']} ({nome_timbr})",
+        "foto_postazione": foto_url
+    }
+    supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
+    foto_usate[chiave] = id_foto
+    registra_log(op["nome"], azione_log, f"Turno {id_t} - {nome_posto}")
+    st.success(f"✅ {nome_timbr} registrato con successo!")
+    st.rerun()
+
 # --- FUNZIONI VISTA SETTIMANALE DIPENDENTE ---
 def turni_del_dipendente(id_guardia, cognome):
     if df_turni.empty:
@@ -532,50 +586,14 @@ if st.session_state["ruolo"] == "operatore":
                                 st.success(f"✅ Check-in già registrato in data {c_in}.")
                                 st.button("✅ Check-in già eseguito", disabled=True, key=f"btn_dis_in_{id_t}", use_container_width=True)
                             else:
-                                with st.form(f"form_in_{id_t}"):
-                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_in_{id_t}")
-                                    foto_in = st.file_uploader("Foto Entrata Postazione:", type=["jpg", "jpeg", "png"], key=f"fin_{id_t}")
-
-                                    if st.form_submit_button("✅ Conferma Check-in", type="primary", use_container_width=True):
-                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
-                                        update_data = {
-                                            "check_in_effettivo": ad_str,
-                                            "gps_check_in": "41.229565, 14.508582",
-                                            "registrato_da": f"{op['nome']} (Check-in)"
-                                        }
-                                        if foto_in:
-                                            foto_url = salva_foto_su_storage(foto_in, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, "IN")
-                                            update_data["foto_postazione"] = foto_url
-
-                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                        registra_log(op["nome"], "TIMBRATURA_CHECKIN", f"Turno {id_t} - {nome_posto}")
-                                        st.success("✅ Check-in registrato con successo!")
-                                        st.rerun()
+                                render_timbratura("IN", id_t, op, data_oggettiva, nome_posto)
 
                         with tab_out:
                             if gia_fatto_out:
                                 st.success(f"✅ Check-out già registrato in data {c_out}.")
                                 st.button("🔴 Check-out già eseguito", disabled=True, key=f"btn_dis_out_{id_t}", use_container_width=True)
                             else:
-                                with st.form(f"form_out_{id_t}"):
-                                    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_out_{id_t}")
-                                    foto_out = st.file_uploader("Foto Uscita / Consegna:", type=["jpg", "jpeg", "png"], key=f"fout_{id_t}")
-
-                                    if st.form_submit_button("🔴 Conferma Check-out", type="primary", use_container_width=True):
-                                        ad_str = ora_italiana().strftime("%d/%m/%Y %H:%M:%S")
-                                        update_data = {
-                                            "check_out_effettivo": ad_str,
-                                            "gps_check_out": "41.229565, 14.508582",
-                                            "registrato_da": f"{op['nome']} (Check-out)"
-                                        }
-                                        if foto_out:
-                                            foto_url = salva_foto_su_storage(foto_out, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, "OUT")
-                                            update_data["foto_postazione"] = foto_url
-
-                                        supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
-                                        registra_log(op["nome"], "TIMBRATURA_CHECKOUT", f"Turno {id_t} - {nome_posto}")
-                                        st.success("✅ Check-out completato con successo!")
-                                        st.rerun()
+                                render_timbratura("OUT", id_t, op, data_oggettiva, nome_posto)
 
                         with tab_extra:
                             st.info("Carica ulteriori foto extra per questo turno nella tua cartella.")
