@@ -6,7 +6,11 @@ import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import urllib.parse
+import hashlib
+import hmac
+import secrets
 from supabase import create_client
+from streamlit_js_eval import streamlit_js_eval
 
 st.set_page_config(page_title="I Gufi della Notte - Gestione Turni", layout="wide", initial_sidebar_state="expanded")
 
@@ -32,18 +36,47 @@ BUCKET_FOTO = "foto-turni"
 # --- CONFIGURAZIONI & SICUREZZA ---
 TIMEOUT_MINUTI = 15
 
-# Le password possono essere messe in st.secrets (ADMIN_PWD_TIZIANA, ADMIN_PWD_RINO).
-# Se non presenti nei secrets, viene usato il valore di riserva qui sotto.
+# Le password admin si impostano SOLO nei Secrets di Streamlit (ADMIN_PWD_TIZIANA, ADMIN_PWD_RINO):
+# nel codice non c'è più nessuna password di riserva.
 CREDENZIALI_ADMIN = {
     "tiziana": {
-        "password": st.secrets.get("ADMIN_PWD_TIZIANA", "admin2026!"),
+        "password": str(st.secrets.get("ADMIN_PWD_TIZIANA", "")).strip(),
+        "secret": "ADMIN_PWD_TIZIANA",
         "nome": "Tiziana (Direttore Generale Supremo \"MASTO\")"
     },
     "rino": {
-        "password": st.secrets.get("ADMIN_PWD_RINO", "admin2026!"),
+        "password": str(st.secrets.get("ADMIN_PWD_RINO", "")).strip(),
+        "secret": "ADMIN_PWD_RINO",
         "nome": "Rino (Capo Reparto)"
     }
 }
+
+# Password dipendente usata quando nel database il campo è vuoto
+PASSWORD_PREDEFINITA_DIP = "gufi2026!"
+
+# --- 3. PASSWORD CIFRATE (PBKDF2) ---
+# Le password dei dipendenti non vengono più salvate in chiaro. Le vecchie password
+# in chiaro continuano a funzionare e vengono cifrate automaticamente al primo accesso.
+PREFISSO_HASH = "pbkdf2_sha256"
+
+def cifra_password(pwd):
+    sale = secrets.token_hex(16)
+    iterazioni = 200_000
+    impronta = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), bytes.fromhex(sale), iterazioni).hex()
+    return f"{PREFISSO_HASH}${iterazioni}${sale}${impronta}"
+
+def password_cifrata(salvata):
+    return str(salvata).startswith(PREFISSO_HASH + "$")
+
+def verifica_password(pwd, salvata):
+    if password_cifrata(salvata):
+        try:
+            _, iterazioni, sale, impronta = str(salvata).split("$")
+            calcolata = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), bytes.fromhex(sale), int(iterazioni)).hex()
+            return hmac.compare_digest(calcolata, impronta)
+        except Exception:
+            return False
+    return hmac.compare_digest(pwd.encode("utf-8"), str(salvata).encode("utf-8"))
 
 GIORNI_IT = ["Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica"]
 GIORNI_BREVI = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
@@ -218,7 +251,7 @@ def lista_storage(percorso=None, pagina=1000):
         offset += pagina
 
 # --- SALVATAGGIO FOTO CON STRUTTURA REALE ---
-def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
+def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura, gps_info="GPS_NON_RILEVATO"):
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
     giorno_str = giorno_data.strftime("%Y-%m-%d") if isinstance(giorno_data, (date, datetime)) else data_italiana().strftime("%Y-%m-%d")
     cartella_data = giorno_str
@@ -226,14 +259,14 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
 
     data_ora_scatto = ora_italiana()
     orario_str = data_ora_scatto.strftime('%H-%M-%S')
-    gps_info = "41.229565_14.508582"
+    gps_info = re.sub(r'[^0-9A-Za-z_.-]', '_', str(gps_info))
+    tipo_mime = getattr(file_foto, "type", None) or "image/jpeg"
 
     estensione = "png" if tipo_mime == "image/png" else "jpg"
     nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.{estensione}"
     path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
 
     file_bytes = file_foto.getvalue()
-    tipo_mime = getattr(file_foto, "type", None) or "image/jpeg"
     try:
         supabase.storage.from_(BUCKET_FOTO).upload(
             path=path_remoto,
@@ -317,6 +350,65 @@ def estrai_ore_t(r):
         return calcola_ore(cin, cout)
     return calcola_ore(r.get('ora_inizio_prevista', '00:00'), r.get('ora_fine_prevista', '00:00'))
 
+# --- 1. POSIZIONE GPS REALE DEL TELEFONO ---
+# Il browser chiede al dipendente il permesso di usare la posizione. Il risultato
+# arriva con un rerun: finché non arriva vale None ("in attesa").
+JS_GPS = """new Promise(function (risolvi) {
+  if (!navigator.geolocation) { risolvi({error: {code: 0, message: "GPS non supportato dal browser"}}); return; }
+  navigator.geolocation.getCurrentPosition(
+    function (p) { risolvi({coords: {latitude: p.coords.latitude, longitude: p.coords.longitude, accuracy: p.coords.accuracy}, timestamp: Date.now()}); },
+    function (e) { risolvi({error: {code: e.code, message: e.message}}); },
+    {enableHighAccuracy: true, timeout: 20000, maximumAge: 30000}
+  );
+})"""
+
+MOTIVI_GPS = {
+    1: "permesso negato: consenti l'accesso alla posizione nelle impostazioni del browser",
+    2: "posizione non disponibile: attiva la localizzazione del telefono",
+    3: "tempo scaduto: riprova all'aperto o vicino a una finestra",
+}
+GPS_VALIDITA_MINUTI = 10
+
+def rileva_gps():
+    # Restituisce {"stato": "attesa"|"ok"|"errore", "testo": ..., "file": ..., "motivo": ...}
+    tentativo = st.session_state.get("gps_tentativo", 0)
+    ris = streamlit_js_eval(js_expressions=JS_GPS, key=f"gps_rilevamento_{tentativo}")
+    if not ris:
+        return {"stato": "attesa", "testo": "NON RILEVATO (in attesa del GPS)", "file": "GPS_NON_RILEVATO", "motivo": "rilevamento in corso"}
+    if isinstance(ris, dict) and ris.get("coords"):
+        c = ris["coords"]
+        lat, lon, prec = float(c["latitude"]), float(c["longitude"]), c.get("accuracy")
+        prec_txt = f" (±{int(round(prec))} m)" if prec is not None else ""
+        eta_min = (time.time() * 1000 - float(ris.get("timestamp") or 0)) / 60000
+        return {
+            "stato": "ok" if eta_min <= GPS_VALIDITA_MINUTI else "vecchio",
+            "testo": f"{lat:.6f}, {lon:.6f}{prec_txt}",
+            "file": f"{lat:.6f}_{lon:.6f}",
+            "link": f"https://www.google.com/maps/search/?api=1&query={lat:.6f},{lon:.6f}",
+            "motivo": f"posizione rilevata {int(eta_min)} minuti fa"
+        }
+    errore = (ris or {}).get("error", {}) if isinstance(ris, dict) else {}
+    motivo = MOTIVI_GPS.get(errore.get("code"), errore.get("message") or "errore sconosciuto")
+    return {"stato": "errore", "testo": f"NON DISPONIBILE ({motivo})", "file": "GPS_NON_DISPONIBILE", "motivo": motivo}
+
+def aggiorna_gps():
+    st.session_state["gps_tentativo"] = st.session_state.get("gps_tentativo", 0) + 1
+
+# --- 4. PIÙ FOTO PER TURNO ---
+# Nella colonna foto_postazione le foto sono salvate una dopo l'altra separate da " | "
+# (così la foto del check-out non cancella più quella del check-in).
+SEPARATORE_FOTO = " | "
+
+def elenco_foto(valore):
+    return [u.strip() for u in testo(valore).split(SEPARATORE_FOTO.strip()) if u.strip()]
+
+def tipo_foto(url):
+    if "_OUT_" in url:
+        return "Uscita"
+    if "_IN_" in url:
+        return "Entrata"
+    return "Foto"
+
 # --- TIMBRATURA (CHECK-IN / CHECK-OUT) ---
 # Niente st.form: il file_uploader fuori dal form fa un rerun solo quando la foto
 # è arrivata al server, quindi il pulsante resta disabilitato finché l'upload non
@@ -336,11 +428,22 @@ def render_timbratura(tipo, id_t, op, data_oggettiva, nome_posto):
     chiave = f"{tipo}_{id_t}"
     foto_usate = st.session_state.setdefault("foto_timbrature_usate", {})
 
-    st.text_input("📍 Posizione GPS (Certificata Automaticamente):", value="41.229565, 14.508582", disabled=True, key=f"gps_{tipo.lower()}_{id_t}")
+    gps = st.session_state.get("gps_corrente") or {"stato": "attesa", "testo": "NON RILEVATO", "file": "GPS_NON_RILEVATO", "motivo": ""}
+    if gps["stato"] == "ok":
+        st.success(f"📍 Posizione GPS rilevata: {gps['testo']}")
+    elif gps["stato"] == "attesa":
+        st.info("📍 Rilevamento posizione in corso... Se il telefono lo chiede, premi **Consenti**.")
+    else:
+        st.warning(f"📍 GPS: {gps['motivo']}. Premi **Aggiorna posizione** in alto prima di timbrare.")
+
+    if tipo == "OUT" and isinstance(data_oggettiva, date) and data_oggettiva < data_italiana() - timedelta(days=1):
+        st.warning("⏰ Check-out in ritardo: verrà registrato l'orario di adesso. Avvisa il responsabile dell'orario reale di fine turno.")
+
     foto = st.file_uploader(etichetta_foto, type=["jpg", "jpeg", "png"], key=f"f{tipo.lower()}_{id_t}")
 
     id_foto = getattr(foto, "file_id", None) or (f"{foto.name}_{foto.size}" if foto else None)
-    foto_pronta = foto is not None and foto_usate.get(chiave) != id_foto
+    # Pulsante attivo solo con foto caricata e GPS rilevato (o con errore dichiarato); se la posizione è vecchia va aggiornata
+    foto_pronta = foto is not None and foto_usate.get(chiave) != id_foto and gps["stato"] in ("ok", "errore")
 
     if foto is None:
         st.warning("📸 Scatta o seleziona la foto e attendi che il caricamento finisca: il pulsante si attiverà da solo.")
@@ -349,26 +452,27 @@ def render_timbratura(tipo, id_t, op, data_oggettiva, nome_posto):
         return
 
     # Ricontrolla sul database: se il turno risulta già timbrato non sovrascrivere l'orario
-    riga = supabase.table("turni").select(campo_ora).eq("id_turno", id_t).execute().data or []
+    riga = supabase.table("turni").select(f"{campo_ora}, foto_postazione").eq("id_turno", id_t).execute().data or []
     if riga and timbrato(riga[0].get(campo_ora)):
         st.warning(f"{nome_timbr} già registrato per questo turno.")
         st.rerun()
 
     try:
-        foto_url = salva_foto_su_storage(foto, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, tipo)
+        foto_url = salva_foto_su_storage(foto, data_oggettiva, nome_posto, op['id'], op['nome'], id_t, tipo, gps["file"])
     except Exception:
         st.error("❌ Foto non caricata: timbratura NON registrata. Controlla la connessione e riprova.")
         return
     update_data = {
         campo_ora: ora_italiana().strftime("%d/%m/%Y %H:%M:%S"),
-        campo_gps: "41.229565, 14.508582",
+        campo_gps: gps["testo"],
         "registrato_da": f"{op['nome']} ({nome_timbr})",
-        "foto_postazione": foto_url
+        "foto_postazione": SEPARATORE_FOTO.join(elenco_foto(riga[0].get("foto_postazione") if riga else "") + [foto_url])
     }
     supabase.table("turni").update(update_data).eq("id_turno", id_t).execute()
     foto_usate[chiave] = id_foto
     registra_log(op["nome"], azione_log, f"Turno {id_t} - {nome_posto}")
     st.success(f"✅ {nome_timbr} registrato con successo!")
+    aggiorna_gps()  # la prossima timbratura rileva di nuovo la posizione
     st.rerun()
 
 # --- FUNZIONI VISTA SETTIMANALE DIPENDENTE ---
@@ -485,8 +589,15 @@ if not st.session_state["autenticato"]:
                     # Con più dipendenti con lo stesso cognome entra quello con la password corretta
                     record_dip = None
                     for _, r_dip in trovato.iterrows():
-                        if val_pwd == (testo(r_dip.get('password')) or 'gufi2026!'):
+                        pwd_salvata = testo(r_dip.get('password')) or PASSWORD_PREDEFINITA_DIP
+                        if verifica_password(val_pwd, pwd_salvata):
                             record_dip = r_dip
+                            # Vecchia password in chiaro: la cifro subito nel database
+                            if not password_cifrata(pwd_salvata):
+                                try:
+                                    supabase.table("dipendenti").update({"password": cifra_password(val_pwd)}).eq("id_guardia", r_dip['id_guardia']).execute()
+                                except Exception:
+                                    pass
                             break
 
                     if not trovato.empty:
@@ -511,7 +622,10 @@ if not st.session_state["autenticato"]:
                 adm_pwd = st.text_input("Password:", type="password")
                 btn_adm = st.form_submit_button("Accedi al Pannello Admin", type="primary", width="stretch")
                 if btn_adm:
-                    if adm_pwd == CREDENZIALI_ADMIN[adm_user]["password"]:
+                    pwd_admin = CREDENZIALI_ADMIN[adm_user]["password"]
+                    if not pwd_admin:
+                        st.error(f"Password non configurata. Aggiungi {CREDENZIALI_ADMIN[adm_user]['secret']} nei Secrets dell'app su Streamlit Cloud.")
+                    elif hmac.compare_digest(adm_pwd.encode("utf-8"), pwd_admin.encode("utf-8")):
                         st.session_state["autenticato"] = True
                         st.session_state["ruolo"] = "admin"
                         st.session_state["utente_corrente"] = {
@@ -539,6 +653,21 @@ if st.session_state["ruolo"] == "operatore":
             st.session_state["autenticato"] = False
             st.rerun()
 
+    gps_corrente = rileva_gps()
+    st.session_state["gps_corrente"] = gps_corrente
+    c_g1, c_g2 = st.columns([4, 1.2])
+    with c_g1:
+        if gps_corrente["stato"] == "ok":
+            st.caption(f"📍 Posizione attuale: [{gps_corrente['testo']}]({gps_corrente['link']})")
+        elif gps_corrente["stato"] == "attesa":
+            st.caption("📍 Rilevamento posizione in corso... Se il telefono lo chiede, premi **Consenti**.")
+        elif gps_corrente["stato"] == "vecchio":
+            st.caption(f"📍 {gps_corrente['motivo'].capitalize()}: premi **Aggiorna posizione** prima di timbrare.")
+        else:
+            st.caption(f"⚠️ GPS: {gps_corrente['motivo']}.")
+    with c_g2:
+        st.button("🔄 Aggiorna posizione", on_click=aggiorna_gps, width="stretch", key="btn_aggiorna_gps")
+
     st.markdown("---")
     tab_attivi, tab_settimana_op, tab_storico, tab_foto_op = st.tabs([
         "🟢 Turni da Svolgere / Oggi",
@@ -551,6 +680,9 @@ if st.session_state["ruolo"] == "operatore":
 
     oggi = data_italiana()
     limite_aperti_recenti = oggi - timedelta(days=1)
+    # Un turno con check-in ma senza check-out resta tra quelli da svolgere per qualche giorno,
+    # così il dipendente può ancora chiuderlo
+    limite_checkout_dimenticato = oggi - timedelta(days=3)
 
     def turno_completato(r):
         return timbrato(r.get('check_in_effettivo')) and timbrato(r.get('check_out_effettivo'))
@@ -558,10 +690,13 @@ if st.session_state["ruolo"] == "operatore":
     if turni_miei.empty:
         condizione_attivo = pd.Series([], dtype=bool)
     else:
-        condizione_attivo = (
-            (turni_miei['data_dt'].apply(lambda d: d is not None and pd.notna(d) and d >= limite_aperti_recenti).astype(bool)) &
-            (~turni_miei.apply(turno_completato, axis=1))
-        )
+        recente = turni_miei['data_dt'].apply(lambda d: d is not None and pd.notna(d) and d >= limite_aperti_recenti).astype(bool)
+        checkout_mancante = turni_miei.apply(
+            lambda r: timbrato(r.get('check_in_effettivo')) and not timbrato(r.get('check_out_effettivo'))
+            and r.get('data_dt') is not None and pd.notna(r.get('data_dt')) and r.get('data_dt') >= limite_checkout_dimenticato,
+            axis=1
+        ).astype(bool)
+        condizione_attivo = (recente | checkout_mancante) & (~turni_miei.apply(turno_completato, axis=1))
 
     # 1. SCHEDA TURNI ATTIVI
     with tab_attivi:
@@ -650,7 +785,7 @@ if st.session_state["ruolo"] == "operatore":
 
                             if st.button("📤 Carica Foto Extra su Cloud", type="primary", width="stretch", disabled=foto_extra is None, key=f"btn_extra_{id_t}"):
                                 try:
-                                    salva_foto_su_storage(foto_extra, data_oggettiva, nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA")
+                                    salva_foto_su_storage(foto_extra, data_oggettiva, nome_posto, op['id'], op['nome'], f"{id_t}_{pulisci_nome(desc_extra)}", "EXTRA", (st.session_state.get("gps_corrente") or {}).get("file", "GPS_NON_RILEVATO"))
                                     registra_log(op["nome"], "CARICAMENTO_FOTO_EXTRA", f"Turno {id_t} - {nome_posto}")
                                     st.success("✅ Foto extra caricata correttamente!")
                                 except Exception:
@@ -713,12 +848,15 @@ if st.session_state["ruolo"] == "operatore":
             ]
         if not mie_foto.empty:
             cols = st.columns(3)
-            for idx_f, (_, r_f) in enumerate(mie_foto.iterrows()):
-                with cols[idx_f % 3]:
-                    try:
-                        st.image(r_f['foto_postazione'], caption=f"Turno: {r_f['id_turno']} ({r_f['data']})", width="stretch")
-                    except Exception:
-                        pass
+            idx_f = 0
+            for _, r_f in mie_foto.iterrows():
+                for url_f in elenco_foto(r_f['foto_postazione']):
+                    with cols[idx_f % 3]:
+                        try:
+                            st.image(url_f, caption=f"{tipo_foto(url_f)} — Turno: {r_f['id_turno']} ({r_f['data']})", width="stretch")
+                        except Exception:
+                            pass
+                    idx_f += 1
         else:
             st.info("Nessuna foto salvata su Supabase Storage associata ai tuoi turni.")
 
@@ -792,14 +930,16 @@ if st.session_state["ruolo"] == "admin":
                             "Cognome Guardia": t.get('cognome_guardia', ''),
                             "Orario": f"{t.get('ora_inizio_prevista', '-')} - {t.get('ora_fine_prevista', '-')}",
                             "Entrata (Check-in)": cin if timbrato(cin) else "⏳ Non timbrato",
+                            "GPS Entrata": testo(t.get('gps_check_in')) or "-",
                             "Uscita (Check-out)": cout if timbrato(cout) else "⏳ Non timbrato",
+                            "GPS Uscita": testo(t.get('gps_check_out')) or "-",
                             "Registrato Da": t.get('registrato_da', 'Sistema')
                         })
                 else:
                     righe_sett.append({
                         "Giorno": f"{GIORNI_IT[i]} ({g_curr.strftime('%d/%m')})",
                         "Turno ID": "-", "Cognome Guardia": "❌ NESSUNA GUARDIA", "Orario": "-",
-                        "Entrata (Check-in)": "-", "Uscita (Check-out)": "-", "Registrato Da": "-"
+                        "Entrata (Check-in)": "-", "GPS Entrata": "-", "Uscita (Check-out)": "-", "GPS Uscita": "-", "Registrato Da": "-"
                     })
             st.dataframe(pd.DataFrame(righe_sett), width="stretch")
 
@@ -940,7 +1080,7 @@ if st.session_state["ruolo"] == "admin":
             scelta_m = st.selectbox("Filtra per Mese:", tutti_i_mesi)
 
             view_recap = recap_df if scelta_m == "Tutti i Mesi" else recap_df[recap_df['Mese_Anno'] == scelta_m]
-            colonne_show = ['id_turno', 'data', 'Mese_Anno', 'id_postazione', 'nome_cliente', 'indirizzo_sede', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'check_out_effettivo', 'registrato_da']
+            colonne_show = ['id_turno', 'data', 'Mese_Anno', 'id_postazione', 'nome_cliente', 'indirizzo_sede', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista', 'check_in_effettivo', 'gps_check_in', 'check_out_effettivo', 'gps_check_out', 'registrato_da']
             colonne_show = [c for c in colonne_show if c in view_recap.columns]
             st.dataframe(view_recap[colonne_show], width="stretch")
 
@@ -982,7 +1122,7 @@ if st.session_state["ruolo"] == "admin":
                                 "email": mod_email.strip()
                             }
                             if mod_pwd.strip():
-                                dati_mod["password"] = mod_pwd.strip()
+                                dati_mod["password"] = cifra_password(mod_pwd.strip())
                             try:
                                 supabase.table("dipendenti").update(dati_mod).eq("id_guardia", riga_g['id_guardia']).execute()
                                 registra_log(adm["nome"], "MODIFICA_DIPENDENTE", f"Aggiornato {mod_cognome} ({id_g_mod})" + (" + password" if mod_pwd.strip() else ""))
@@ -1001,7 +1141,7 @@ if st.session_state["ruolo"] == "admin":
                     nuovo_nome = st.text_input("Nome")
                 with c_d2:
                     nuova_email = st.text_input("Email")
-                    nuova_pwd = st.text_input("Password Iniziale", value="gufi2026!")
+                    nuova_pwd = st.text_input("Password Iniziale", value=PASSWORD_PREDEFINITA_DIP)
 
                 if st.form_submit_button("💾 Salva Nuovo Dipendente", type="primary"):
                     id_esistenti = set(df_dip['id_guardia'].apply(testo).str.lower()) if not df_dip.empty else set()
@@ -1016,7 +1156,7 @@ if st.session_state["ruolo"] == "admin":
                                 "cognome": nuovo_cognome.strip(),
                                 "nome": nuovo_nome.strip(),
                                 "email": nuova_email.strip(),
-                                "password": nuova_pwd.strip()
+                                "password": cifra_password(nuova_pwd.strip() or PASSWORD_PREDEFINITA_DIP)
                             }).execute()
                             registra_log(adm["nome"], "AGGIUNGI_DIPENDENTE", f"Creato {nuovo_cognome} ({nuovo_id_g})")
                             st.success(f"Dipendente {nuovo_cognome} registrato!")
