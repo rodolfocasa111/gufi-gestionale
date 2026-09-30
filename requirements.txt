@@ -1,3 +1,4 @@
-streamlit
+streamlit>=1.50
 pandas
 supabase
+streamlit-js-eval>=1.0
