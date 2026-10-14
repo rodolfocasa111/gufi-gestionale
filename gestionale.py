@@ -155,6 +155,12 @@ def carica_dati():
             'foto_postazione', 'registrato_da'
         ])
 
+    # Normalizza gli ID postazione (spazi iniziali/finali) per i confronti
+    if 'id_postazione' in df_turni.columns:
+        df_turni['id_postazione'] = df_turni['id_postazione'].fillna('').astype(str).str.strip()
+    if 'id_postazione' in df_post.columns:
+        df_post['id_postazione'] = df_post['id_postazione'].fillna('').astype(str).str.strip()
+
     # Aggiungi colonna data_dt standardizzata
     if not df_turni.empty and 'data' in df_turni.columns:
         df_turni['data_dt'] = df_turni['data'].apply(analizza_data_completa)
@@ -970,6 +976,12 @@ if st.session_state["ruolo"] == "admin":
                     with cp_m2:
                         mod_ind_post = st.text_input("Indirizzo Completo (Google Maps):", value=str(riga_post.get('indirizzo_sede', '')))
 
+                    n_turni_collegati = int((df_turni['id_postazione'] == id_pst_sel).sum()) if 'id_postazione' in df_turni.columns else 0
+                    conferma_elimina = False
+                    if n_turni_collegati > 0:
+                        st.warning(f"⚠️ A questa postazione sono collegati {n_turni_collegati} turni. Eliminandola, i turni resteranno senza postazione.")
+                        conferma_elimina = st.checkbox("Confermo di voler eliminare la postazione anche se ha turni collegati")
+
                     c_salva, c_elimina = st.columns([1, 1])
                     with c_salva:
                         btn_salva_p = st.form_submit_button("💾 Salva Modifiche", type="primary", use_container_width=True)
@@ -985,7 +997,9 @@ if st.session_state["ruolo"] == "admin":
                         st.success("Postazione aggiornata su Cloud!")
                         st.rerun()
 
-                    if btn_elimina_p:
+                    if btn_elimina_p and n_turni_collegati > 0 and not conferma_elimina:
+                        st.error("Eliminazione bloccata: spunta la conferma oppure riassegna prima i turni a un'altra postazione.")
+                    elif btn_elimina_p:
                         supabase.table("postazioni").delete().eq("id_postazione", id_pst_sel).execute()
                         registra_log(adm["nome"], "ELIMINAZIONE_POSTAZIONE", f"Eliminata postazione {id_pst_sel} - {riga_post.get('nome_cliente')}")
                         st.success(f"Postazione {id_pst_sel} eliminata con successo!")
@@ -1012,6 +1026,32 @@ if st.session_state["ruolo"] == "admin":
                         registra_log(adm["nome"], "AGGIUNGI_POSTAZIONE", f"Creata {nuovo_nome_p} ({nuovo_id_p})")
                         st.success(f"Postazione {nuovo_nome_p} registrata!")
                         st.rerun()
+
+        # --- RECUPERO TURNI SENZA POSTAZIONE (ID non più esistente) ---
+        st.markdown("#### 🔗 Turni senza postazione (da ricollegare)")
+        ids_validi = set(df_post['id_postazione']) if not df_post.empty else set()
+        turni_orfani = df_turni[~df_turni['id_postazione'].isin(ids_validi)] if 'id_postazione' in df_turni.columns else df_turni.iloc[0:0]
+        if turni_orfani.empty:
+            st.success("Tutti i turni sono collegati a una postazione esistente.")
+        else:
+            st.warning(f"Ci sono {len(turni_orfani)} turni collegati a un ID postazione che non esiste più (es. postazione eliminata o ID cambiato). Puoi ricollegarli qui sotto.")
+            for vecchio_id, gruppo in turni_orfani.groupby('id_postazione'):
+                etichetta_id = vecchio_id if vecchio_id else "(vuoto)"
+                with st.expander(f"ID non trovato: {etichetta_id} — {len(gruppo)} turni"):
+                    st.dataframe(gruppo[[c for c in ['id_turno', 'data', 'cognome_guardia', 'ora_inizio_prevista', 'ora_fine_prevista'] if c in gruppo.columns]], use_container_width=True, hide_index=True)
+                    if not df_post.empty:
+                        map_dest = {f"{r['id_postazione']} - {r['nome_cliente']}": r['id_postazione'] for _, r in df_post.iterrows()}
+                        dest_str = st.selectbox("Ricollega questi turni alla postazione:", list(map_dest.keys()), key=f"dest_orf_{etichetta_id}")
+                        if st.button("🔗 Ricollega turni", key=f"btn_orf_{etichetta_id}", type="primary"):
+                            id_dest = map_dest[dest_str]
+                            for tid in gruppo['id_turno'].tolist():
+                                supabase.table("turni").update({"id_postazione": id_dest}).eq("id_turno", tid).execute()
+                            registra_log(adm["nome"], "RICOLLEGA_TURNI", f"Spostati {len(gruppo)} turni da '{etichetta_id}' a {id_dest}")
+                            st.success(f"✅ {len(gruppo)} turni ricollegati a {dest_str}!")
+                            time.sleep(0.5)
+                            st.rerun()
+                    else:
+                        st.info("Crea prima una postazione a cui ricollegare i turni.")
 
         st.markdown("#### Elenco Postazioni Attive (Ordinate per ID)")
         st.dataframe(df_post.sort_values(by='id_postazione', ascending=True), use_container_width=True)
