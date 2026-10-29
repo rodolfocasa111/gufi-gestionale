@@ -1223,7 +1223,7 @@ if st.session_state["ruolo"] == "admin":
         st.subheader("🧹 Pulizia Operatori & Postazioni Vuote")
         st.caption("Qui trovi gli operatori e le postazioni che non hanno nessun turno (né passato né futuro). Togli la spunta a quelli da tenere, poi conferma l'eliminazione.")
 
-        tab_pul_post, tab_pul_dip = st.tabs(["📍 Postazioni senza turni", "👥 Operatori senza turni"])
+        tab_pul_post, tab_pul_dip, tab_pul_bianchi = st.tabs(["📍 Postazioni senza turni", "👥 Operatori senza turni", "⬜ Voci lasciate in bianco"])
 
         with tab_pul_post:
             ids_con_turni = set(df_turni['id_postazione']) if 'id_postazione' in df_turni.columns else set()
@@ -1264,6 +1264,64 @@ if st.session_state["ruolo"] == "admin":
                         st.success(f"✅ Eliminati {len(sel_dv)} operatori.")
                         time.sleep(0.8)
                         st.rerun()
+
+        with tab_pul_bianchi:
+            st.caption("Postazioni senza nome cliente e operatori senza cognome (es. righe create e lasciate vuote come G0.. o P0..). Compaiono anche se hanno dei turni collegati.")
+
+            def _vuoto(v):
+                return pd.isna(v) or str(v).strip().lower() in ("", "nan", "none")
+
+            def _elimina_riga(tabella, colonna, valore):
+                if _vuoto(valore):
+                    supabase.table(tabella).delete().is_(colonna, "null").execute()
+                    supabase.table(tabella).delete().eq(colonna, "").execute()
+                else:
+                    supabase.table(tabella).delete().eq(colonna, str(valore).strip()).execute()
+
+            # Postazioni senza nome
+            st.markdown("##### 📍 Postazioni senza nome")
+            post_bianche = df_post[df_post['nome_cliente'].apply(_vuoto)] if not df_post.empty else df_post
+            if post_bianche.empty:
+                st.success("Nessuna postazione lasciata in bianco.")
+            else:
+                df_pb = post_bianche[['id_postazione', 'nome_cliente', 'indirizzo_sede']].copy()
+                df_pb.insert(1, "Turni collegati", df_pb['id_postazione'].apply(lambda i: int((df_turni['id_postazione'] == i).sum()) if 'id_postazione' in df_turni.columns else 0))
+                df_pb.insert(0, "Elimina", True)
+                edit_pb = st.data_editor(df_pb, use_container_width=True, hide_index=True, disabled=[c for c in df_pb.columns if c != "Elimina"], key="editor_pulizia_post_bianche")
+                sel_pb = edit_pb[edit_pb['Elimina'] == True]
+                n_turni_pb = int(sel_pb['Turni collegati'].sum())
+                if n_turni_pb > 0:
+                    st.warning(f"⚠️ Le postazioni selezionate hanno {n_turni_pb} turni collegati: resteranno nella sezione 'Turni senza postazione' per poterli ricollegare.")
+                conferma_pb = st.checkbox(f"Confermo l'eliminazione definitiva di {len(sel_pb)} postazioni senza nome", key="conf_pulizia_post_bianche")
+                if st.button("🗑️ Elimina Postazioni Senza Nome", type="primary", disabled=not (conferma_pb and len(sel_pb) > 0), key="btn_pulizia_post_bianche"):
+                    for id_pb in sel_pb['id_postazione'].tolist():
+                        _elimina_riga("postazioni", "id_postazione", id_pb)
+                    registra_log(adm["nome"], "PULIZIA_POSTAZIONI_BIANCHE", f"Eliminate postazioni senza nome: {sel_pb['id_postazione'].tolist()}")
+                    st.success(f"✅ Eliminate {len(sel_pb)} postazioni senza nome.")
+                    time.sleep(0.8)
+                    st.rerun()
+
+            # Operatori senza cognome
+            st.markdown("##### 👥 Operatori senza cognome")
+            dip_bianchi = df_dip[df_dip['cognome'].apply(_vuoto)] if not df_dip.empty else df_dip
+            if dip_bianchi.empty:
+                st.success("Nessun operatore lasciato in bianco.")
+            else:
+                df_db = dip_bianchi[[c for c in ['id_guardia', 'cognome', 'nome', 'email'] if c in dip_bianchi.columns]].copy()
+                df_db.insert(1, "Turni collegati", df_db['id_guardia'].apply(lambda i: int((df_turni['id_guardia'].astype(str).str.strip().str.lower() == str(i).strip().lower()).sum()) if 'id_guardia' in df_turni.columns and not _vuoto(i) else 0))
+                df_db.insert(0, "Elimina", True)
+                edit_db = st.data_editor(df_db, use_container_width=True, hide_index=True, disabled=[c for c in df_db.columns if c != "Elimina"], key="editor_pulizia_dip_bianchi")
+                sel_db = edit_db[edit_db['Elimina'] == True]
+                if int(sel_db['Turni collegati'].sum()) > 0:
+                    st.warning(f"⚠️ Gli operatori selezionati hanno {int(sel_db['Turni collegati'].sum())} turni collegati: i turni NON verranno cancellati.")
+                conferma_db = st.checkbox(f"Confermo l'eliminazione definitiva di {len(sel_db)} operatori senza cognome", key="conf_pulizia_dip_bianchi")
+                if st.button("🗑️ Elimina Operatori Senza Cognome", type="primary", disabled=not (conferma_db and len(sel_db) > 0), key="btn_pulizia_dip_bianchi"):
+                    for id_db in sel_db['id_guardia'].tolist():
+                        _elimina_riga("dipendenti", "id_guardia", id_db)
+                    registra_log(adm["nome"], "PULIZIA_OPERATORI_BIANCHI", f"Eliminati operatori senza cognome: {sel_db['id_guardia'].tolist()}")
+                    st.success(f"✅ Eliminati {len(sel_db)} operatori senza cognome.")
+                    time.sleep(0.8)
+                    st.rerun()
 
     # 9. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
