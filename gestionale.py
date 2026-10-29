@@ -247,6 +247,22 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
     url_pubblico = supabase.storage.from_(BUCKET_FOTO).get_public_url(path_remoto)
     return url_pubblico
 
+# --- LETTURA CARTELLE STORAGE (supera il limite di 100 elementi di Supabase) ---
+def lista_storage(percorso="", pagina=1000):
+    tutti = []
+    inizio = 0
+    while True:
+        blocco = supabase.storage.from_(BUCKET_FOTO).list(percorso, {
+            "limit": pagina,
+            "offset": inizio,
+            "sortBy": {"column": "name", "order": "asc"}
+        }) or []
+        tutti.extend(blocco)
+        if len(blocco) < pagina:
+            break
+        inizio += pagina
+    return tutti
+
 def calcola_ore(ora_inizio, ora_fine):
     try:
         if pd.isna(ora_inizio) or pd.isna(ora_fine):
@@ -692,6 +708,7 @@ if st.session_state["ruolo"] == "admin":
             "📍 Gestione Postazioni (Modifica/Aggiungi)",
             "💶 Piano Economico (Fatturato & Ore)",
             "📁 Foto Postazioni Cloud",
+            "🧹 Pulizia Operatori & Postazioni Vuote",
             "🛡️ Registro Modifiche (Audit Log)"
         ],
         label_visibility="collapsed"
@@ -1130,14 +1147,14 @@ if st.session_state["ruolo"] == "admin":
         st.caption("Naviga tra le cartelle degli operatori, le date e le postazioni per visualizzare o eliminare le foto.")
 
         try:
-            root_items = supabase.storage.from_(BUCKET_FOTO).list()
+            root_items = lista_storage()
             operatori_cartelle = [item["name"] for item in root_items if "." not in item["name"]]
 
             if operatori_cartelle:
                 op_scelto = st.selectbox("👤 Seleziona Operatore:", sorted(operatori_cartelle))
 
                 if op_scelto:
-                    date_items = supabase.storage.from_(BUCKET_FOTO).list(op_scelto)
+                    date_items = lista_storage(op_scelto)
                     date_cartelle = [item["name"] for item in date_items if "." not in item["name"]]
 
                     if date_cartelle:
@@ -1145,7 +1162,7 @@ if st.session_state["ruolo"] == "admin":
 
                         if data_scelta:
                             path_pos = f"{op_scelto}/{data_scelta}"
-                            pos_items = supabase.storage.from_(BUCKET_FOTO).list(path_pos)
+                            pos_items = lista_storage(path_pos)
                             pos_cartelle = [item["name"] for item in pos_items if "." not in item["name"]]
 
                             if pos_cartelle:
@@ -1153,7 +1170,7 @@ if st.session_state["ruolo"] == "admin":
 
                                 if pos_scelta:
                                     path_file_finali = f"{op_scelto}/{data_scelta}/{pos_scelta}"
-                                    file_items = supabase.storage.from_(BUCKET_FOTO).list(path_file_finali)
+                                    file_items = lista_storage(path_file_finali)
 
                                     immagini_trovate = [item for item in file_items if item.get("name") and "." in item.get("name")]
 
@@ -1201,7 +1218,54 @@ if st.session_state["ruolo"] == "admin":
         except Exception as e_err:
             st.error(f"Errore di lettura dalle cartelle Storage: {e_err}")
 
-    # 8. AUDIT LOG
+    # 8. PULIZIA OPERATORI & POSTAZIONI SENZA TURNI
+    elif menu_admin == "🧹 Pulizia Operatori & Postazioni Vuote":
+        st.subheader("🧹 Pulizia Operatori & Postazioni Vuote")
+        st.caption("Qui trovi gli operatori e le postazioni che non hanno nessun turno (né passato né futuro). Togli la spunta a quelli da tenere, poi conferma l'eliminazione.")
+
+        tab_pul_post, tab_pul_dip = st.tabs(["📍 Postazioni senza turni", "👥 Operatori senza turni"])
+
+        with tab_pul_post:
+            ids_con_turni = set(df_turni['id_postazione']) if 'id_postazione' in df_turni.columns else set()
+            post_vuote = df_post[~df_post['id_postazione'].isin(ids_con_turni)] if not df_post.empty else df_post
+            if post_vuote.empty:
+                st.success("Nessuna postazione senza turni.")
+            else:
+                df_pv = post_vuote[['id_postazione', 'nome_cliente', 'indirizzo_sede']].copy()
+                df_pv.insert(0, "Elimina", True)
+                edit_pv = st.data_editor(df_pv, use_container_width=True, hide_index=True, disabled=['id_postazione', 'nome_cliente', 'indirizzo_sede'], key="editor_pulizia_post")
+                sel_pv = edit_pv[edit_pv['Elimina'] == True]['id_postazione'].tolist()
+                conferma_pv = st.checkbox(f"Confermo l'eliminazione definitiva di {len(sel_pv)} postazioni", key="conf_pulizia_post")
+                if st.button("🗑️ Elimina Postazioni Selezionate", type="primary", disabled=not (conferma_pv and sel_pv), key="btn_pulizia_post"):
+                    for id_pv in sel_pv:
+                        supabase.table("postazioni").delete().eq("id_postazione", id_pv).execute()
+                    registra_log(adm["nome"], "PULIZIA_POSTAZIONI", f"Eliminate postazioni senza turni: {sel_pv}")
+                    st.success(f"✅ Eliminate {len(sel_pv)} postazioni.")
+                    time.sleep(0.8)
+                    st.rerun()
+
+        with tab_pul_dip:
+            if df_dip.empty:
+                st.success("Nessun operatore registrato.")
+            else:
+                dip_vuoti = df_dip[df_dip.apply(lambda r: turni_del_dipendente(r['id_guardia'], r['cognome']).empty, axis=1)]
+                if dip_vuoti.empty:
+                    st.success("Nessun operatore senza turni.")
+                else:
+                    df_dv = dip_vuoti[[c for c in ['id_guardia', 'cognome', 'nome', 'email'] if c in dip_vuoti.columns]].copy()
+                    df_dv.insert(0, "Elimina", True)
+                    edit_dv = st.data_editor(df_dv, use_container_width=True, hide_index=True, disabled=[c for c in df_dv.columns if c != "Elimina"], key="editor_pulizia_dip")
+                    sel_dv = edit_dv[edit_dv['Elimina'] == True]['id_guardia'].tolist()
+                    conferma_dv = st.checkbox(f"Confermo l'eliminazione definitiva di {len(sel_dv)} operatori", key="conf_pulizia_dip")
+                    if st.button("🗑️ Elimina Operatori Selezionati", type="primary", disabled=not (conferma_dv and sel_dv), key="btn_pulizia_dip"):
+                        for id_dv in sel_dv:
+                            supabase.table("dipendenti").delete().eq("id_guardia", id_dv).execute()
+                        registra_log(adm["nome"], "PULIZIA_OPERATORI", f"Eliminati operatori senza turni: {sel_dv}")
+                        st.success(f"✅ Eliminati {len(sel_dv)} operatori.")
+                        time.sleep(0.8)
+                        st.rerun()
+
+    # 9. AUDIT LOG
     elif menu_admin == "🛡️ Registro Modifiche (Audit Log)":
         st.subheader("🛡️ Storico Azioni Capi Reparto (Supabase Audit)")
         res_log = supabase.table("audit_log").select("*").order("id", desc=True).limit(500).execute()
