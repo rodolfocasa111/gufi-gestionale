@@ -6,6 +6,8 @@ import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import urllib.parse
+import io
+from PIL import Image, ImageOps
 from supabase import create_client
 
 st.set_page_config(page_title="I Gufi della Notte - Gestione Turni", layout="wide", initial_sidebar_state="expanded")
@@ -212,6 +214,38 @@ def risolvi_cognome_effettivo(r):
 if not df_turni.empty:
     df_turni['cognome_guardia'] = df_turni.apply(risolvi_cognome_effettivo, axis=1)
 
+# --- COMPRESSIONE FOTO (riduce lo spazio occupato su Supabase Storage) ---
+FOTO_LATO_MAX = 1600
+FOTO_QUALITA_JPEG = 70
+SOGLIA_FOTO_PESANTE = 450 * 1024
+
+def comprimi_foto(file_bytes):
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((FOTO_LATO_MAX, FOTO_LATO_MAX))
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=FOTO_QUALITA_JPEG, optimize=True)
+        compressa = buffer.getvalue()
+        return compressa if len(compressa) < len(file_bytes) else file_bytes
+    except Exception:
+        return file_bytes
+
+def elenca_tutte_le_foto(percorso=""):
+    foto = []
+    for item in lista_storage(percorso):
+        nome = item.get("name")
+        if not nome:
+            continue
+        path_item = f"{percorso}/{nome}" if percorso else nome
+        if item.get("id") is None:
+            foto.extend(elenca_tutte_le_foto(path_item))
+        else:
+            foto.append({"path": path_item, "size": int((item.get("metadata") or {}).get("size") or 0)})
+    return foto
+
 # --- SALVATAGGIO FOTO CON STRUTTURA REALE ---
 def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, nome_guardia, id_turno, tipo_timbratura):
     cartella_operatore = pulisci_nome(f"{id_guardia}_{nome_guardia}")
@@ -226,7 +260,7 @@ def salva_foto_su_storage(file_foto, giorno_data, nome_postazione, id_guardia, n
     nome_file = f"Turno_{pulisci_nome(id_turno)}_{tipo_timbratura}_Data_{giorno_str}_Ore_{orario_str}_GPS_{gps_info}.jpg"
     path_remoto = f"{cartella_operatore}/{cartella_data}/{cartella_posizione}/{nome_file}"
 
-    file_bytes = file_foto.getvalue()
+    file_bytes = comprimi_foto(file_foto.getvalue())
     try:
         supabase.storage.from_(BUCKET_FOTO).upload(
             path=path_remoto,
@@ -1145,6 +1179,52 @@ if st.session_state["ruolo"] == "admin":
     elif menu_admin == "📁 Foto Postazioni Cloud":
         st.subheader("📁 Foto Archiviate su Supabase Storage (Visualizzazione a Cartelle)")
         st.caption("Naviga tra le cartelle degli operatori, le date e le postazioni per visualizzare o eliminare le foto.")
+
+        with st.expander("🗜️ Spazio occupato & compressione foto già caricate"):
+            st.caption("Le nuove foto vengono compresse automaticamente al caricamento. Qui puoi comprimere anche quelle già presenti: restano allo stesso posto e con lo stesso link, ma occupano molto meno spazio.")
+            if st.button("📏 Calcola spazio occupato", key="btn_calcola_spazio"):
+                try:
+                    st.session_state["elenco_foto_storage"] = elenca_tutte_le_foto()
+                except Exception as e_sp:
+                    st.error(f"Errore di lettura dello Storage: {e_sp}")
+            elenco_foto = st.session_state.get("elenco_foto_storage")
+            if elenco_foto is not None:
+                foto_pesanti = [f for f in elenco_foto if f["size"] > SOGLIA_FOTO_PESANTE and f["path"].lower().endswith((".jpg", ".jpeg", ".png"))]
+                mb_totali = sum(f["size"] for f in elenco_foto) / (1024 * 1024)
+                cs1, cs2, cs3 = st.columns(3)
+                cs1.metric("Foto totali", len(elenco_foto))
+                cs2.metric("Spazio occupato", f"{mb_totali:.0f} MB")
+                cs3.metric("Foto ancora da comprimere", len(foto_pesanti))
+                if foto_pesanti:
+                    n_lotto = st.number_input("Quante foto comprimere adesso:", min_value=1, max_value=len(foto_pesanti), value=min(200, len(foto_pesanti)), key="n_lotto_compressione")
+                    if st.button("🗜️ Comprimi foto", type="primary", key="btn_comprimi_foto"):
+                        barra = st.progress(0.0)
+                        liberati = 0
+                        errori = 0
+                        lotto = foto_pesanti[:int(n_lotto)]
+                        for idx_c, f_c in enumerate(lotto):
+                            try:
+                                originale = supabase.storage.from_(BUCKET_FOTO).download(f_c["path"])
+                                compressa = comprimi_foto(originale)
+                                if len(compressa) < len(originale):
+                                    supabase.storage.from_(BUCKET_FOTO).update(
+                                        path=f_c["path"],
+                                        file=compressa,
+                                        file_options={"content-type": "image/jpeg"}
+                                    )
+                                    liberati += len(originale) - len(compressa)
+                                    f_c["size"] = len(compressa)
+                                else:
+                                    f_c["size"] = 0
+                            except Exception:
+                                errori += 1
+                            barra.progress((idx_c + 1) / len(lotto))
+                        registra_log(adm["nome"], "COMPRESSIONE_FOTO_CLOUD", f"Compresse {len(lotto) - errori} foto, liberati {liberati / (1024 * 1024):.0f} MB")
+                        st.success(f"✅ Compresse {len(lotto) - errori} foto: liberati {liberati / (1024 * 1024):.0f} MB." + (f" {errori} non riuscite." if errori else ""))
+                        time.sleep(1.5)
+                        st.rerun()
+                else:
+                    st.success("Tutte le foto sono già compresse.")
 
         try:
             root_items = lista_storage()
